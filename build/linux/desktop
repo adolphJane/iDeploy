@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Name=iDeploy
+Comment=Local Docker delivery and remote operations for macOS
+# The Exec line includes %u to pass the URL to the application
+Exec=/usr/local/bin/iDeploy %u
+Terminal=false
+Type=Application
+Icon=iDeploy
+Categories=Utility;
+StartupWMClass=iDeploy
+
+ 

@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<MsixPackagingToolTemplate
+    xmlns="http://schemas.microsoft.com/msix/packaging/msixpackagingtool/template/2022">
+    <Settings
+        AllowTelemetry="false"
+        ApplyACLsToPackageFiles="true"
+        GenerateCommandLineFile="true"
+        AllowPromptForPassword="false">
+    </Settings>
+    <Installer
+        Path="ideploy"
+        Arguments=""
+        InstallLocation="C:\Program Files\iDeploy\iDeploy">
+    </Installer>
+    <PackageInformation
+        PackageName="iDeploy"
+        PackageDisplayName="iDeploy"
+        PublisherName="CN=iDeploy"
+        PublisherDisplayName="iDeploy"
+        Version="0.1.0.0"
+        PackageDescription="Local Docker delivery and remote operations for macOS">
+        <Capabilities>
+            <Capability Name="runFullTrust" />
+            
+        </Capabilities>
+        <Applications>
+            <Application
+                Id="com.ideploy.app"
+                Description="Local Docker delivery and remote operations for macOS"
+                DisplayName="iDeploy"
+                ExecutableName="ideploy"
+                EntryPoint="Windows.FullTrustApplication">
+                
+            </Application>
+        </Applications>
+        <Resources>
+            <Resource Language="en-us" />
+        </Resources>
+        <Dependencies>
+            <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.19041.0" />
+        </Dependencies>
+        <Properties>
+            <Framework>false</Framework>
+            <DisplayName>iDeploy</DisplayName>
+            <PublisherDisplayName>iDeploy</PublisherDisplayName>
+            <Description>Local Docker delivery and remote operations for macOS</Description>
+            <Logo>Assets\AppIcon.png</Logo>
+        </Properties>
+    </PackageInformation>
+    <SaveLocation PackagePath="ideploy.msix" />
+    <PackageIntegrity>
+        <CertificatePath></CertificatePath>
+    </PackageIntegrity>
+</MsixPackagingToolTemplate>

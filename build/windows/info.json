@@ -1,0 +1,15 @@
+{
+	"fixed": {
+		"file_version": "0.1.0"
+	},
+	"info": {
+		"0000": {
+			"ProductVersion": "0.1.0",
+			"CompanyName": "iDeploy",
+			"FileDescription": "Local Docker delivery and remote operations for macOS",
+			"LegalCopyright": "Copyright 2026 iDeploy",
+			"ProductName": "iDeploy",
+			"Comments": "Single-user local Docker delivery console"
+		}
+	}
+}
