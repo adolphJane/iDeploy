@@ -26,7 +26,8 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
-const appVersion = "0.2.0-dev"
+// Release builds inject the Git tag through -ldflags -X.
+var appVersion = "0.2.0-dev"
 
 type ToolStatus struct {
 	Name      string `json:"name"`

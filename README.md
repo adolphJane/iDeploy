@@ -50,7 +50,28 @@ cd frontend && npm run build
 cd .. && wails3 build
 ```
 
-## 目录
+## GitHub Releases 自动打包
+
+工作流：`.github/workflows/release.yml`。无需 Apple Developer ID 或额外 Secrets，发布任务使用 GitHub 自动提供的 `GITHUB_TOKEN`。仓库需允许 GitHub Actions 运行；组织策略不能禁止该任务的 `contents: write` 权限。
+
+先将代码合并/推送到 `main`，再为需要发布的提交创建新标签：
+
+```bash
+git switch main
+git pull --ff-only
+git tag -a v0.2.0 -m "Release v0.2.0"
+git push origin v0.2.0
+```
+
+Actions 自动测试并构建 macOS 13+ Universal 应用（arm64 + Intel x86_64），校验签名和架构后创建 Release，附件包括 `iDeploy-v0.2.0-macos-universal.zip` 和 `SHA256SUMS.txt`。解压得到 `iDeploy.app`。`v0.2.1-beta.1` 等带后缀的标签自动标记为预发布；已有 Release 不覆盖，请使用新版本标签。
+
+应用显示版本由标签注入，Info.plist 使用对应的三段数字版本。未经过 Apple Developer ID 签名和公证，macOS 可能拦截首次启动；仅在确认下载来源及校验值后按系统安全提示处理，不要关闭全局安全保护。凭据存储当前依赖 macOS 钥匙串，因此暂不发布 Windows/Linux 安装包。
+
+只验证构建、不发布：进入 **Actions → Release macOS → Run workflow**，填写 `v0.0.0-test`。完成后从该运行的 Artifacts 下载 `macos-release`（保留 14 天）。本地也可以运行 `bash build/darwin/release.sh v0.0.0-test`，输出位于 `bin/release/`。
+
+注意：这里的标签是 **iDeploy 应用版本**，不是应用内管理的部署项目版本。Release 发布不会自动更新已经安装的应用。
+
+## 目录结构
 
 - `main.go`：macOS 窗口、菜单栏与应用入口；
 - `systemservice.go`：Vue 可调用的桌面服务接口；
