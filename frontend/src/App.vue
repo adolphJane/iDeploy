@@ -605,13 +605,33 @@ async function loadAISettings() {
 }
 
 async function saveDeepSeekAPIKey() {
-  if (aiSettingsSaving.value) return
+  const apiKey = deepSeekAPIKey.value.trim()
+  if (aiSettingsSaving.value || !apiKey) return
   aiSettingsSaving.value = true
+  settingsError.value = ''
   try {
-    await SystemService.SaveDeepSeekAPIKey(deepSeekAPIKey.value)
-    aiSettings.value = { deepSeekConfigured: !!deepSeekAPIKey.value.trim() }
+    await SystemService.SaveDeepSeekAPIKey(apiKey)
+    aiSettings.value = { deepSeekConfigured: true }
     deepSeekAPIKey.value = ''
-    notice.value = aiSettings.value.deepSeekConfigured ? 'DeepSeek API Key 已保存到系统钥匙串' : 'DeepSeek API Key 已清除'
+    deepSeekKeyVisible.value = false
+    notice.value = 'DeepSeek API Key 已保存到系统钥匙串'
+  } catch (error) {
+    settingsError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    aiSettingsSaving.value = false
+  }
+}
+
+async function clearDeepSeekAPIKey() {
+  if (aiSettingsSaving.value || !aiSettings.value.deepSeekConfigured) return
+  aiSettingsSaving.value = true
+  settingsError.value = ''
+  try {
+    await SystemService.SaveDeepSeekAPIKey('')
+    aiSettings.value = { deepSeekConfigured: false }
+    deepSeekAPIKey.value = ''
+    deepSeekKeyVisible.value = false
+    notice.value = 'DeepSeek API Key 已清除'
   } catch (error) {
     settingsError.value = error instanceof Error ? error.message : String(error)
   } finally {
@@ -2675,7 +2695,7 @@ watch(activeSection, (section) => {
           <div class="settings-list">
             <article class="settings-row">
               <div class="settings-icon">↻</div>
-              <div class="settings-copy"><strong>清理运行缓存</strong><span>删除文件缓存和远程 Docker 容器快照；保留服务器、项目、部署关联和登录凭据。</span><code>{{ overview?.cachePath || '正在读取缓存目录…' }}</code></div>
+              <div class="settings-copy"><strong>清理运行缓存</strong><span>删除文件缓存和远程 Docker 容器快照；保留服务器、项目、部署关联和登录凭据。</span><code :title="overview?.cachePath">{{ overview?.cachePath || '正在读取缓存目录…' }}</code></div>
               <button class="secondary-button" :disabled="cacheCleaning || serverDataClearing" @click="clearRuntimeCache">{{ cacheCleaning ? '清理中…' : '清理缓存' }}</button>
             </article>
 
@@ -2697,12 +2717,24 @@ watch(activeSection, (section) => {
           <div class="settings-row ai-settings-row">
             <div class="settings-icon">✦</div>
             <div class="settings-copy"><strong>DeepSeek</strong><span>{{ aiSettings.deepSeekConfigured ? 'API Key 已配置，保存在 macOS 系统钥匙串。' : '未配置 API Key；常见技术栈仍可使用内置模板离线生成。' }}</span><small>调用 DeepSeek 时只发送受限项目清单摘要；生成结果必须预览确认后才会写入项目。</small></div>
-            <div class="ai-settings-form"><div class="secret-input"><input v-model="deepSeekAPIKey" :type="deepSeekKeyVisible ? 'text' : 'password'" autocomplete="new-password" placeholder="输入 DeepSeek API Key"><button type="button" @click="deepSeekKeyVisible = !deepSeekKeyVisible">{{ deepSeekKeyVisible ? '隐藏' : '显示' }}</button></div><button class="secondary-button" :disabled="aiSettingsSaving" @click="saveDeepSeekAPIKey">{{ aiSettingsSaving ? '保存中…' : deepSeekAPIKey ? '保存 Key' : '清除 Key' }}</button></div>
+            <div class="ai-settings-form">
+              <label class="ai-key-label" for="deepseek-api-key">API Key</label>
+              <div class="ai-key-controls">
+                <div class="secret-input">
+                  <input id="deepseek-api-key" v-model="deepSeekAPIKey" :type="deepSeekKeyVisible ? 'text' : 'password'" autocomplete="new-password" placeholder="输入 DeepSeek API Key">
+                  <button type="button" :aria-label="deepSeekKeyVisible ? '隐藏 API Key' : '显示 API Key'" :aria-pressed="deepSeekKeyVisible" @click="deepSeekKeyVisible = !deepSeekKeyVisible">{{ deepSeekKeyVisible ? '隐藏' : '显示' }}</button>
+                </div>
+                <div class="ai-key-actions">
+                  <button class="secondary-button ai-key-action" :disabled="aiSettingsSaving || !deepSeekAPIKey.trim()" @click="saveDeepSeekAPIKey">{{ aiSettingsSaving && deepSeekAPIKey.trim() ? '保存中…' : '保存 Key' }}</button>
+                  <button v-if="aiSettings.deepSeekConfigured" class="text-button danger-text ai-key-clear" :disabled="aiSettingsSaving" @click="clearDeepSeekAPIKey">清除 Key</button>
+                </div>
+              </div>
+            </div>
           </div>
         </section>
 
         <section v-if="cleanupResult" class="cleanup-result" role="status"><strong>{{ cleanupResult.detail }}</strong><span>服务器 {{ cleanupResult.servers }} · 部署关联 {{ cleanupResult.deployments }} · 快照 {{ cleanupResult.snapshots }} · 任务 {{ cleanupResult.jobs }} · Keychain 凭据 {{ cleanupResult.credentials }}</span><span v-if="cleanupResult.credentialErrors" class="cleanup-warning">有 {{ cleanupResult.credentialErrors }} 个 Keychain 凭据需要手动清理。</span></section>
-        <section class="panel storage-paths"><div><span>数据库</span><code>{{ overview?.databasePath || '—' }}</code></div><div><span>日志</span><code>{{ overview?.logPath || '—' }}</code></div></section>
+        <section class="panel storage-paths"><div><span>数据库</span><code :title="overview?.databasePath">{{ overview?.databasePath || '—' }}</code></div><div><span>日志</span><code :title="overview?.logPath">{{ overview?.logPath || '—' }}</code></div></section>
       </section>
 
       <section v-else class="module-placeholder" :aria-label="activeSectionMeta.title">
