@@ -14,9 +14,11 @@ import (
 	"sync"
 	"time"
 
+	"ideploy/internal/databasebrowser"
 	"ideploy/internal/deployment"
 	"ideploy/internal/job"
 	"ideploy/internal/platform/database"
+	"ideploy/internal/platform/instance"
 	appPaths "ideploy/internal/platform/paths"
 	"ideploy/internal/platform/toolchain"
 	"ideploy/internal/project"
@@ -81,6 +83,75 @@ type RegistryInput struct {
 	Endpoint string `json:"endpoint"`
 	Username string `json:"username"`
 	Password string `json:"password"`
+}
+
+type DatabaseConnectionInput struct {
+	Name         string `json:"name"`
+	Driver       string `json:"driver"`
+	Host         string `json:"host"`
+	Port         int    `json:"port"`
+	DatabaseName string `json:"databaseName"`
+	Username     string `json:"username"`
+	Password     string `json:"password"`
+	SSLMode      string `json:"sslMode"`
+}
+
+type DatabaseConnectionView struct {
+	ID                   string `json:"id"`
+	Name                 string `json:"name"`
+	Driver               string `json:"driver"`
+	Host                 string `json:"host"`
+	Port                 int    `json:"port"`
+	DatabaseName         string `json:"databaseName"`
+	Username             string `json:"username"`
+	SSLMode              string `json:"sslMode"`
+	CredentialConfigured bool   `json:"credentialConfigured"`
+	CreatedAt            string `json:"createdAt"`
+	UpdatedAt            string `json:"updatedAt"`
+	LastConnectedAt      string `json:"lastConnectedAt"`
+	LastError            string `json:"lastError"`
+}
+
+type DatabaseSchemaView struct {
+	Name string `json:"name"`
+}
+type DatabaseOverviewView struct {
+	Version           string `json:"version"`
+	DatabaseSizeBytes *int64 `json:"databaseSizeBytes"`
+	SizeDetail        string `json:"sizeDetail"`
+}
+type DatabaseTableView struct {
+	Schema string `json:"schema"`
+	Name   string `json:"name"`
+	Type   string `json:"type"`
+}
+type DatabaseColumnView struct {
+	Name         string `json:"name"`
+	DataType     string `json:"dataType"`
+	Nullable     bool   `json:"nullable"`
+	DefaultValue string `json:"defaultValue"`
+	PrimaryKey   bool   `json:"primaryKey"`
+	Comment      string `json:"comment"`
+}
+type DatabaseIndexView struct {
+	Name    string   `json:"name"`
+	Columns []string `json:"columns"`
+	Unique  bool     `json:"unique"`
+}
+type DatabaseTableQuery struct {
+	Page       int    `json:"page"`
+	PageSize   int    `json:"pageSize"`
+	SortColumn string `json:"sortColumn"`
+	SortDesc   bool   `json:"sortDesc"`
+}
+type DatabaseTablePageView struct {
+	Columns    []DatabaseColumnView `json:"columns"`
+	Rows       []map[string]string  `json:"rows"`
+	Page       int                  `json:"page"`
+	PageSize   int                  `json:"pageSize"`
+	HasNext    bool                 `json:"hasNext"`
+	SortColumn string               `json:"sortColumn"`
+	SortDesc   bool                 `json:"sortDesc"`
 }
 
 type RegistryView struct {
@@ -330,10 +401,13 @@ type SystemService struct {
 	db             *sql.DB
 	store          *job.Store
 	registries     *registry.Store
+	databases      *databasebrowser.Store
 	servers        *server.Store
 	projects       *project.Store
 	deployments    *deployment.Store
 	runner         *job.Runner
+	runtimeLock    *instance.Lock
+	controlServer  *cliControlServer
 	paths          appPaths.AppPaths
 	recoveredJobs  int64
 	emit           func(JobView)
@@ -394,6 +468,13 @@ func (s *SystemService) setDeploymentEmitter(emit func(DeploymentView)) {
 }
 
 func (s *SystemService) ServiceStartup(ctx context.Context, _ application.ServiceOptions) error {
+	return s.start(ctx, true)
+}
+
+// start initialises the application core without requiring a Wails runtime.
+// The desktop enables the local control socket; a one-shot CLI invocation does
+// not, because it already owns and calls this service directly.
+func (s *SystemService) start(ctx context.Context, serveControl bool) error {
 	paths, err := appPaths.Resolve()
 	if err != nil {
 		return err
@@ -401,23 +482,35 @@ func (s *SystemService) ServiceStartup(ctx context.Context, _ application.Servic
 	if err := appPaths.Ensure(paths); err != nil {
 		return err
 	}
+	return s.startWithPaths(ctx, serveControl, paths)
+}
+
+func (s *SystemService) startWithPaths(ctx context.Context, serveControl bool, paths appPaths.AppPaths) error {
+	runtimeLock, err := instance.Acquire(filepath.Join(paths.DataDir, "runtime.lock"))
+	if err != nil {
+		return err
+	}
 
 	db, err := database.Open(ctx, paths.DatabasePath)
 	if err != nil {
+		_ = runtimeLock.Release()
 		return err
 	}
 	store := job.NewStore(db)
 	registries := registry.NewStore(db)
+	databases := databasebrowser.NewStore(db)
 	servers := server.NewStore(db)
 	projects := project.NewStore(db)
 	deployments := deployment.NewStore(db)
 	recovered, err := store.RecoverInterrupted(ctx)
 	if err != nil {
 		db.Close()
+		_ = runtimeLock.Release()
 		return err
 	}
 	if _, err := deployments.RecoverInterruptedReleases(ctx); err != nil {
 		db.Close()
+		_ = runtimeLock.Release()
 		return err
 	}
 
@@ -439,15 +532,27 @@ func (s *SystemService) ServiceStartup(ctx context.Context, _ application.Servic
 	s.db = db
 	s.store = store
 	s.registries = registries
+	s.databases = databases
 	s.servers = servers
 	s.projects = projects
 	s.deployments = deployments
 	s.runner = runner
+	s.runtimeLock = runtimeLock
 	s.paths = paths
 	s.recoveredJobs = recovered
 	s.mu.Unlock()
 
 	runner.Start(ctx)
+	if serveControl {
+		controlServer, err := startCLIControlServer(filepath.Join(paths.DataDir, "control.sock"), s)
+		if err != nil {
+			_ = s.close()
+			return err
+		}
+		s.mu.Lock()
+		s.controlServer = controlServer
+		s.mu.Unlock()
+	}
 	return nil
 }
 
@@ -467,6 +572,212 @@ func (s *SystemService) ListRegistries() ([]RegistryView, error) {
 		result = append(result, toRegistryView(connection))
 	}
 	return result, nil
+}
+
+// ListDatabaseConnections returns locally saved remote database profiles. The
+// password is intentionally never exposed to the frontend.
+func (s *SystemService) ListDatabaseConnections() ([]DatabaseConnectionView, error) {
+	store, err := s.databaseStore()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	connections, err := store.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]DatabaseConnectionView, 0, len(connections))
+	for _, connection := range connections {
+		result = append(result, toDatabaseConnectionView(connection))
+	}
+	return result, nil
+}
+
+func (s *SystemService) CreateDatabaseConnection(input DatabaseConnectionInput) (DatabaseConnectionView, error) {
+	if strings.TrimSpace(input.Password) == "" {
+		return DatabaseConnectionView{}, errors.New("请填写数据库密码")
+	}
+	store, err := s.databaseStore()
+	if err != nil {
+		return DatabaseConnectionView{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	connection, err := store.Create(ctx, toDatabaseConnection(input, ""))
+	if err != nil {
+		return DatabaseConnectionView{}, err
+	}
+	credentialRef := databasebrowser.PasswordCredentialRef(connection.ID)
+	if err := databasebrowser.SavePassword(ctx, credentialRef, input.Password); err != nil {
+		_, _ = store.Delete(ctx, connection.ID)
+		return DatabaseConnectionView{}, err
+	}
+	connection, err = store.Update(ctx, connection.ID, toDatabaseConnection(input, credentialRef))
+	if err != nil {
+		_ = databasebrowser.DeletePassword(ctx, credentialRef)
+		_, _ = store.Delete(ctx, connection.ID)
+		return DatabaseConnectionView{}, err
+	}
+	return toDatabaseConnectionView(connection), nil
+}
+
+func (s *SystemService) UpdateDatabaseConnection(id string, input DatabaseConnectionInput) (DatabaseConnectionView, error) {
+	store, err := s.databaseStore()
+	if err != nil {
+		return DatabaseConnectionView{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	current, err := store.Get(ctx, id)
+	if err != nil {
+		return DatabaseConnectionView{}, err
+	}
+	credentialRef := current.CredentialRef
+	if strings.TrimSpace(input.Password) != "" {
+		credentialRef = databasebrowser.PasswordCredentialRef(id)
+		if err := databasebrowser.SavePassword(ctx, credentialRef, input.Password); err != nil {
+			return DatabaseConnectionView{}, err
+		}
+	}
+	if credentialRef == "" {
+		return DatabaseConnectionView{}, errors.New("请填写数据库密码")
+	}
+	updated, err := store.Update(ctx, id, toDatabaseConnection(input, credentialRef))
+	if err != nil {
+		return DatabaseConnectionView{}, err
+	}
+	return toDatabaseConnectionView(updated), nil
+}
+
+func (s *SystemService) DeleteDatabaseConnection(id string) error {
+	store, err := s.databaseStore()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	credentialRef, err := store.Delete(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := databasebrowser.DeletePassword(ctx, credentialRef); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *SystemService) TestDatabaseConnection(input DatabaseConnectionInput) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	err := databasebrowser.Test(ctx, toDatabaseConnection(input, ""), input.Password)
+	return s.withDatabaseDiagnosticLog(input.Driver, input.Host, input.Port, input.DatabaseName, input.Username, input.SSLMode, err)
+}
+
+func (s *SystemService) TestSavedDatabaseConnection(id string) error {
+	store, connection, password, ctx, cancel, err := s.databaseConnectionContext(id, 12*time.Second)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	err = databasebrowser.Test(ctx, databasebrowser.NewConnection{Name: connection.Name, Driver: connection.Driver, Host: connection.Host, Port: connection.Port, DatabaseName: connection.DatabaseName, Username: connection.Username, SSLMode: connection.SSLMode}, password)
+	_ = store.RecordConnection(context.Background(), id, err)
+	return s.withDatabaseDiagnosticLog(string(connection.Driver), connection.Host, connection.Port, connection.DatabaseName, connection.Username, connection.SSLMode, err)
+}
+
+func (s *SystemService) ListDatabaseSchemas(id string) ([]DatabaseSchemaView, error) {
+	store, connection, password, ctx, cancel, err := s.databaseConnectionContext(id, 15*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	values, err := databasebrowser.ListSchemas(ctx, connection, password)
+	_ = store.RecordConnection(context.Background(), id, err)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]DatabaseSchemaView, 0, len(values))
+	for _, value := range values {
+		result = append(result, DatabaseSchemaView{Name: value.Name})
+	}
+	return result, nil
+}
+
+func (s *SystemService) GetDatabaseOverview(id, schema string) (DatabaseOverviewView, error) {
+	_, connection, password, ctx, cancel, err := s.databaseConnectionContext(id, 15*time.Second)
+	if err != nil {
+		return DatabaseOverviewView{}, err
+	}
+	defer cancel()
+	value, err := databasebrowser.GetOverview(ctx, connection, password, schema)
+	if err != nil {
+		return DatabaseOverviewView{}, err
+	}
+	return DatabaseOverviewView{Version: value.Version, DatabaseSizeBytes: value.DatabaseSizeBytes, SizeDetail: value.SizeDetail}, nil
+}
+
+func (s *SystemService) ListDatabaseTables(id, schema string) ([]DatabaseTableView, error) {
+	store, connection, password, ctx, cancel, err := s.databaseConnectionContext(id, 15*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	values, err := databasebrowser.ListTables(ctx, connection, password, schema)
+	_ = store.RecordConnection(context.Background(), id, err)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]DatabaseTableView, 0, len(values))
+	for _, value := range values {
+		result = append(result, DatabaseTableView{Schema: value.Schema, Name: value.Name, Type: value.Type})
+	}
+	return result, nil
+}
+
+func (s *SystemService) GetDatabaseTableColumns(id, schema, table string) ([]DatabaseColumnView, error) {
+	store, connection, password, ctx, cancel, err := s.databaseConnectionContext(id, 15*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	values, err := databasebrowser.GetColumns(ctx, connection, password, schema, table)
+	_ = store.RecordConnection(context.Background(), id, err)
+	if err != nil {
+		return nil, err
+	}
+	return toDatabaseColumnViews(values), nil
+}
+
+func (s *SystemService) GetDatabaseTableIndexes(id, schema, table string) ([]DatabaseIndexView, error) {
+	store, connection, password, ctx, cancel, err := s.databaseConnectionContext(id, 15*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
+	values, err := databasebrowser.GetIndexes(ctx, connection, password, schema, table)
+	_ = store.RecordConnection(context.Background(), id, err)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]DatabaseIndexView, 0, len(values))
+	for _, value := range values {
+		result = append(result, DatabaseIndexView{Name: value.Name, Columns: value.Columns, Unique: value.Unique})
+	}
+	return result, nil
+}
+
+func (s *SystemService) GetDatabaseTableRows(id, schema, table string, input DatabaseTableQuery) (DatabaseTablePageView, error) {
+	store, connection, password, ctx, cancel, err := s.databaseConnectionContext(id, 20*time.Second)
+	if err != nil {
+		return DatabaseTablePageView{}, err
+	}
+	defer cancel()
+	page, err := databasebrowser.GetTableRows(ctx, connection, password, schema, table, databasebrowser.TableQuery{Page: input.Page, PageSize: input.PageSize, SortColumn: input.SortColumn, SortDesc: input.SortDesc})
+	_ = store.RecordConnection(context.Background(), id, err)
+	if err != nil {
+		return DatabaseTablePageView{}, err
+	}
+	return DatabaseTablePageView{Columns: toDatabaseColumnViews(page.Columns), Rows: page.Rows, Page: page.Page, PageSize: page.PageSize, HasNext: page.HasNext, SortColumn: page.SortColumn, SortDesc: page.SortDesc}, nil
 }
 
 func (s *SystemService) CreateRegistry(input RegistryInput) (RegistryView, error) {
@@ -1442,18 +1753,43 @@ func (s *SystemService) enqueueServerJob(serverID, jobType string, payload any) 
 }
 
 func (s *SystemService) ServiceShutdown() error {
-	s.mu.RLock()
+	return s.close()
+}
+
+func (s *SystemService) close() error {
+	s.mu.Lock()
+	controlServer := s.controlServer
 	runner := s.runner
 	db := s.db
-	s.mu.RUnlock()
+	runtimeLock := s.runtimeLock
+	s.controlServer = nil
+	s.runner = nil
+	s.db = nil
+	s.runtimeLock = nil
+	s.store = nil
+	s.registries = nil
+	s.databases = nil
+	s.servers = nil
+	s.projects = nil
+	s.deployments = nil
+	s.mu.Unlock()
 
+	if controlServer != nil {
+		_ = controlServer.Close()
+	}
 	if runner != nil {
 		runner.Stop()
 	}
+	var closeErr error
 	if db != nil {
-		return db.Close()
+		closeErr = db.Close()
 	}
-	return nil
+	if runtimeLock != nil {
+		if err := runtimeLock.Release(); closeErr == nil {
+			closeErr = err
+		}
+	}
+	return closeErr
 }
 
 func (s *SystemService) GetOverview() (Overview, error) {
@@ -1567,6 +1903,82 @@ func (s *SystemService) deploymentStore() (*deployment.Store, error) {
 		return nil, errors.New("deployment service is not ready")
 	}
 	return s.deployments, nil
+}
+
+func (s *SystemService) databaseStore() (*databasebrowser.Store, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.databases == nil {
+		return nil, errors.New("数据库浏览服务尚未初始化")
+	}
+	return s.databases, nil
+}
+
+func (s *SystemService) databaseConnectionContext(id string, timeout time.Duration) (*databasebrowser.Store, databasebrowser.Connection, string, context.Context, context.CancelFunc, error) {
+	store, err := s.databaseStore()
+	if err != nil {
+		return nil, databasebrowser.Connection{}, "", nil, nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	connection, err := store.Get(ctx, id)
+	if err != nil {
+		cancel()
+		return nil, databasebrowser.Connection{}, "", nil, nil, err
+	}
+	password, err := databasebrowser.LoadPassword(ctx, connection.CredentialRef)
+	if err != nil {
+		cancel()
+		return nil, databasebrowser.Connection{}, "", nil, nil, errors.New("此连接的数据库密码不可用，请编辑连接后重新保存")
+	}
+	return store, connection, password, ctx, cancel, nil
+}
+
+func toDatabaseConnection(input DatabaseConnectionInput, credentialRef string) databasebrowser.NewConnection {
+	return databasebrowser.NewConnection{Name: input.Name, Driver: databasebrowser.Driver(input.Driver), Host: input.Host, Port: input.Port, DatabaseName: input.DatabaseName, Username: input.Username, SSLMode: input.SSLMode, CredentialRef: credentialRef}
+}
+
+func toDatabaseConnectionView(value databasebrowser.Connection) DatabaseConnectionView {
+	lastConnected := ""
+	if value.LastConnected != nil {
+		lastConnected = value.LastConnected.UTC().Format(time.RFC3339Nano)
+	}
+	return DatabaseConnectionView{ID: value.ID, Name: value.Name, Driver: string(value.Driver), Host: value.Host, Port: value.Port, DatabaseName: value.DatabaseName, Username: value.Username, SSLMode: value.SSLMode, CredentialConfigured: value.CredentialRef != "", CreatedAt: value.CreatedAt.UTC().Format(time.RFC3339Nano), UpdatedAt: value.UpdatedAt.UTC().Format(time.RFC3339Nano), LastConnectedAt: lastConnected, LastError: value.LastError}
+}
+
+func toDatabaseColumnViews(values []databasebrowser.Column) []DatabaseColumnView {
+	result := make([]DatabaseColumnView, 0, len(values))
+	for _, value := range values {
+		result = append(result, DatabaseColumnView{Name: value.Name, DataType: value.DataType, Nullable: value.Nullable, DefaultValue: value.DefaultValue, PrimaryKey: value.PrimaryKey, Comment: value.Comment})
+	}
+	return result
+}
+
+// withDatabaseDiagnosticLog records connection test outcomes without ever
+// writing a password or a full DSN. The returned error points users to the
+// log file when an actionable failure occurred.
+func (s *SystemService) withDatabaseDiagnosticLog(driver, host string, port int, databaseName, username, sslMode string, connectionErr error) error {
+	s.mu.RLock()
+	logDir := s.paths.LogDir
+	s.mu.RUnlock()
+	if logDir == "" {
+		return connectionErr
+	}
+	logPath := filepath.Join(logDir, "database-connections.log")
+	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err == nil {
+		result := "success"
+		detail := "read-only connection test passed"
+		if connectionErr != nil {
+			result = "failed"
+			detail = strings.ReplaceAll(connectionErr.Error(), "\n", " ")
+		}
+		_, _ = fmt.Fprintf(file, "%s result=%s driver=%q host=%q port=%d database=%q username=%q tls=%q detail=%q\n", time.Now().UTC().Format(time.RFC3339Nano), result, driver, host, port, databaseName, username, sslMode, detail)
+		_ = file.Close()
+	}
+	if connectionErr != nil {
+		return fmt.Errorf("%w；诊断日志：%s", connectionErr, logPath)
+	}
+	return nil
 }
 
 func (s *SystemService) registryTestHandler(ctx context.Context, task job.Job, reporter job.Reporter) error {

@@ -3,6 +3,7 @@ package main
 import (
 	"embed"
 	"log"
+	"os"
 	"runtime"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -27,6 +28,16 @@ func init() {
 }
 
 func main() {
+	if shouldRunMCP(os.Args[1:]) {
+		os.Exit(runMCPCommand(os.Stderr))
+	}
+	if shouldRunCLI(os.Args[1:]) {
+		os.Exit(runCLI(os.Args[1:], os.Stdout, os.Stderr))
+	}
+	runDesktop()
+}
+
+func runDesktop() {
 	systemService := NewSystemService()
 	app := application.New(application.Options{
 		Name:        "iDeploy",

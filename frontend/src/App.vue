@@ -71,6 +71,33 @@ type RegistryInput = {
   password: string
 }
 
+type DatabaseDriver = 'postgres' | 'mysql'
+type DatabaseConnectionInput = {
+  name: string
+  driver: DatabaseDriver
+  host: string
+  port: number
+  databaseName: string
+  username: string
+  password: string
+  sslMode: 'require' | 'disable'
+}
+type DatabaseConnectionView = Omit<DatabaseConnectionInput, 'password'> & {
+  id: string
+  credentialConfigured: boolean
+  createdAt: string
+  updatedAt: string
+  lastConnectedAt: string
+  lastError: string
+}
+type DatabaseSchemaView = { name: string }
+type DatabaseOverviewView = { version: string; databaseSizeBytes: number | null; sizeDetail: string }
+type DatabaseTableView = { schema: string; name: string; type: string }
+type DatabaseColumnView = { name: string; dataType: string; nullable: boolean; defaultValue: string; primaryKey: boolean; comment: string }
+type DatabaseIndexView = { name: string; columns: string[]; unique: boolean }
+type DatabaseTableQuery = { page: number; pageSize: number; sortColumn: string; sortDesc: boolean }
+type DatabaseTablePageView = { columns: DatabaseColumnView[]; rows: Record<string, string>[]; page: number; pageSize: number; hasNext: boolean; sortColumn: string; sortDesc: boolean }
+
 type RegistryProbeView = {
   endpoint: string
   status: 'healthy' | 'auth_required' | 'degraded' | 'unreachable'
@@ -217,6 +244,7 @@ type DeploymentVersionSuggestionView = {
 }
 
 type AISettingsView = { deepSeekConfigured: boolean }
+type CommandLineToolStatus = { installed: boolean; conflict: boolean; commandPath: string; executablePath: string; detail: string }
 type DockerfileGenerationView = {
   content: string
   technology: string
@@ -278,7 +306,7 @@ type DeploymentRuntime = { deployment: DeploymentView; status: DeploymentRuntime
 
 type RegistryPage = 'connections' | 'projects' | 'repositories' | 'artifacts'
 
-type SectionKey = 'overview' | 'projects' | 'deployments' | 'servers' | 'registries' | 'settings'
+type SectionKey = 'overview' | 'projects' | 'deployments' | 'servers' | 'registries' | 'databases' | 'settings'
 
 type SectionMeta = {
   eyebrow: string
@@ -324,6 +352,13 @@ const sectionMeta: Record<SectionKey, SectionMeta> = {
     emptyTitle: '还没有配置镜像仓库',
     items: ['Harbor 连接', '镜像与标签管理', '代理缓存配置'],
   },
+  databases: {
+    eyebrow: 'REMOTE DATABASES',
+    title: '数据库',
+    description: '以只读方式浏览远程 PostgreSQL、MySQL 与 MariaDB 的结构和数据。',
+    emptyTitle: '还没有配置数据库连接',
+    items: ['安全保存连接凭据', '浏览表与字段', '受限分页读取数据'],
+  },
   settings: {
     eyebrow: 'APPLICATION SETTINGS',
     title: '设置',
@@ -367,6 +402,35 @@ const registryForm = reactive<RegistryInput>({
   username: '',
   password: '',
 })
+const databaseConnections = ref<DatabaseConnectionView[]>([])
+const databaseLoading = ref(false)
+const databaseSaving = ref(false)
+const databaseError = ref('')
+const databaseDialogOpen = ref(false)
+const databaseFormTesting = ref(false)
+const databaseFormTestSuccess = ref('')
+const editingDatabaseID = ref('')
+const selectedDatabaseID = ref('')
+const databaseConnectionsCollapsed = ref(false)
+const databaseSchemas = ref<DatabaseSchemaView[]>([])
+const databaseOverview = ref<DatabaseOverviewView | null>(null)
+const databaseOverviewLoading = ref(false)
+const databaseOverviewError = ref('')
+let databaseOverviewRequestID = 0
+const databaseTables = ref<DatabaseTableView[]>([])
+const selectedDatabaseSchema = ref('')
+const selectedDatabaseTable = ref<DatabaseTableView | null>(null)
+const databaseColumns = ref<DatabaseColumnView[]>([])
+const databaseIndexes = ref<DatabaseIndexView[]>([])
+const databaseTablePage = ref<DatabaseTablePageView | null>(null)
+const databaseDetailTab = ref<'columns' | 'data' | 'indexes'>('columns')
+const databaseSchemaLoading = ref(false)
+const databaseTableLoading = ref(false)
+const databaseDetailLoading = ref(false)
+const savedDatabaseTestingID = ref('')
+const databasePasswordVisible = ref(false)
+const emptyDatabaseForm = (): DatabaseConnectionInput => ({ name: '', driver: 'postgres', host: '', port: 5432, databaseName: '', username: '', password: '', sslMode: 'require' })
+const databaseForm = reactive<DatabaseConnectionInput>(emptyDatabaseForm())
 const servers = ref<ServerView[]>([])
 const serverLoading = ref(false)
 const serverSaving = ref(false)
@@ -455,12 +519,47 @@ const clockNow = ref(Date.now())
 const selectedDeploymentID = ref('')
 const releaseHistoryPanel = ref<HTMLElement | null>(null)
 const deploymentCurrentVersions = ref<Record<string, string>>({})
-const notice = ref('')
 const settingsError = ref('')
+type ToastKind = 'success' | 'info' | 'warning' | 'error'
+type ToastMessage = { id: number; kind: ToastKind; message: string }
+const toasts = ref<ToastMessage[]>([])
+const toastTimers = new Map<number, number>()
+let nextToastID = 0
+
+function dismissToast(id: number) {
+  const timer = toastTimers.get(id)
+  if (timer !== undefined) window.clearTimeout(timer)
+  toastTimers.delete(id)
+  toasts.value = toasts.value.filter(toast => toast.id !== id)
+}
+
+function showToast(message: string, kind: ToastKind = 'success') {
+  const id = ++nextToastID
+  if (toasts.value.length >= 3) dismissToast(toasts.value[0].id)
+  toasts.value.push({ id, kind, message })
+  toastTimers.set(id, window.setTimeout(() => dismissToast(id), kind === 'error' ? 10000 : 4500))
+}
+
+const pageErrors = [
+  { value: errorMessage, title: '本地核心返回错误' },
+  { value: deploymentError, title: '部署项目操作失败' },
+  { value: serverError, title: '服务器操作失败' },
+  { value: workspaceProjectError, title: '项目操作失败' },
+  { value: registryError, title: '镜像仓库操作失败' },
+  { value: databaseError, title: '数据库操作失败' },
+  { value: settingsError, title: '设置操作失败' },
+]
+for (const item of pageErrors) {
+  watch(item.value, message => {
+    if (message && !(item.value === databaseError && databaseDialogOpen.value)) showToast(`${item.title}：${message}`, 'error')
+  })
+}
 const aiSettings = ref<AISettingsView>({ deepSeekConfigured: false })
 const deepSeekAPIKey = ref('')
 const deepSeekKeyVisible = ref(false)
 const aiSettingsSaving = ref(false)
+const commandLineTool = ref<CommandLineToolStatus | null>(null)
+const commandLineToolInstalling = ref(false)
 const cacheCleaning = ref(false)
 const serverDataClearing = ref(false)
 const serverDataConfirming = ref(false)
@@ -475,6 +574,7 @@ const healthyTools = computed(() => overview.value?.tools.filter((tool) => tool.
 const activeSectionMeta = computed(() => sectionMeta[activeSection.value])
 const healthyRegistries = computed(() => registries.value.filter((registry) => registry.status === 'healthy').length)
 const selectedRegistry = computed(() => registries.value.find((registry) => registry.id === selectedRegistryID.value) ?? null)
+const selectedDatabaseConnection = computed(() => databaseConnections.value.find((connection) => connection.id === selectedDatabaseID.value) ?? null)
 const editingRegistry = computed(() => registries.value.find((registry) => registry.id === editingRegistryID.value) ?? null)
 const selectedServer = computed(() => servers.value.find((server) => server.id === selectedServerID.value) ?? null)
 const editingServerCredential = computed(() => servers.value.find((server) => server.id === editingServerCredentialID.value) ?? null)
@@ -513,6 +613,11 @@ const statusLabel: Record<string, string> = {
 const registryKindLabel: Record<RegistryView['kind'], string> = {
   harbor: 'Harbor',
   oci: 'OCI Registry',
+}
+
+const databaseDriverLabel: Record<DatabaseDriver, string> = {
+  postgres: 'PostgreSQL',
+  mysql: 'MySQL / MariaDB',
 }
 
 const registryStatusLabel: Record<RegistryView['status'], string> = {
@@ -604,6 +709,28 @@ async function loadAISettings() {
   }
 }
 
+async function loadCommandLineToolStatus() {
+  try {
+    commandLineTool.value = await SystemService.GetCommandLineToolStatus() as unknown as CommandLineToolStatus
+  } catch (error) {
+    settingsError.value = error instanceof Error ? error.message : String(error)
+  }
+}
+
+async function installCommandLineTool() {
+  if (commandLineToolInstalling.value) return
+  commandLineToolInstalling.value = true
+  settingsError.value = ''
+  try {
+    commandLineTool.value = await SystemService.InstallCommandLineTool() as unknown as CommandLineToolStatus
+    showToast('终端命令已安装，可执行 ideploy version 验证。')
+  } catch (error) {
+    settingsError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    commandLineToolInstalling.value = false
+  }
+}
+
 async function saveDeepSeekAPIKey() {
   const apiKey = deepSeekAPIKey.value.trim()
   if (aiSettingsSaving.value || !apiKey) return
@@ -614,7 +741,7 @@ async function saveDeepSeekAPIKey() {
     aiSettings.value = { deepSeekConfigured: true }
     deepSeekAPIKey.value = ''
     deepSeekKeyVisible.value = false
-    notice.value = 'DeepSeek API Key 已保存到系统钥匙串'
+    showToast('DeepSeek API Key 已保存到系统钥匙串')
   } catch (error) {
     settingsError.value = error instanceof Error ? error.message : String(error)
   } finally {
@@ -631,7 +758,7 @@ async function clearDeepSeekAPIKey() {
     aiSettings.value = { deepSeekConfigured: false }
     deepSeekAPIKey.value = ''
     deepSeekKeyVisible.value = false
-    notice.value = 'DeepSeek API Key 已清除'
+    showToast('DeepSeek API Key 已清除')
   } catch (error) {
     settingsError.value = error instanceof Error ? error.message : String(error)
   } finally {
@@ -681,7 +808,7 @@ async function saveGeneratedDockerfile() {
     const updated = await SystemService.SaveGeneratedDockerfile({ projectId: dockerfileProjectID.value, content: dockerfileGeneration.content, overwrite: dockerfileOverwriteConfirmed.value }) as unknown as ProjectView
     upsertWorkspaceProject(updated)
     dockerfileDialogOpen.value = false
-    notice.value = `Dockerfile 已写入项目（${updated.dockerfilePath}）`
+    showToast(`Dockerfile 已写入项目（${updated.dockerfilePath}）`)
     const pendingDeployment = deployments.value.find(value => value.id === pendingReleaseDeploymentID.value)
     if (pendingDeployment?.projectId === updated.id) {
       if (!updated.imageRepository) {
@@ -952,12 +1079,12 @@ function imageRepositoryValidationIssue(repository: string, selectedRegistry?: R
 function openDeploymentProjectConfig(deployment: DeploymentView, action: 'dockerfile' | 'image') {
   const project = projectForDeployment(deployment)
   if (!project) {
-    notice.value = '项目配置尚未加载，请刷新后重试。'
+    showToast('项目配置尚未加载，请刷新后重试。', 'warning')
     return
   }
   if (action === 'dockerfile') {
     if (project.sourceKind !== 'local') {
-      notice.value = 'Git 项目需要先拉取到本地后才能自动生成 Dockerfile。'
+      showToast('Git 项目需要先拉取到本地后才能自动生成 Dockerfile。', 'warning')
       openWorkspaceProjectDialog(project)
       return
     }
@@ -971,9 +1098,9 @@ function openDeploymentProjectConfig(deployment: DeploymentView, action: 'docker
     const suggested = suggestedImageRepository(project)
     if (suggested) {
       workspaceProjectForm.imageRepository = suggested
-      notice.value = `${currentIssue ? '已修正不完整的 Harbor 镜像地址' : '已根据镜像仓库和项目名称生成目标镜像建议'}：${suggested}，请确认后保存。`
+      showToast(`${currentIssue ? '已修正不完整的 Harbor 镜像地址' : '已根据镜像仓库和项目名称生成目标镜像建议'}：${suggested}，请确认后保存。`, 'info')
     } else {
-      notice.value = '请先配置并检测镜像仓库，才能生成目标镜像建议。'
+      showToast('请先配置并检测镜像仓库，才能生成目标镜像建议。', 'warning')
     }
   }
 }
@@ -1113,11 +1240,11 @@ async function createDeployment() {
     deploymentDialogOpen.value = false
     await refreshDeploymentRuntimes()
     if (!savedDeployment) {
-      notice.value = '部署配置已保存，但暂时无法读取部署目标，请刷新后继续。'
+      showToast('部署配置已保存，但暂时无法读取部署目标，请刷新后继续。', 'warning')
       return
     }
     selectedDeploymentID.value = savedDeployment.id
-    notice.value = '部署配置已保存，正在进入发布前检查。'
+    showToast('部署配置已保存，正在进入发布前检查。')
     await openReleaseDialog(savedDeployment)
   } catch (error) {
     deploymentFormError.value = friendlyError(error)
@@ -1309,7 +1436,7 @@ async function clearRuntimeCache() {
     cleanupResult.value = result
     remoteContainers.value = null
     deploymentContainers.value = {}
-    notice.value = `缓存已清理：${result.snapshots} 份远程快照，${result.cacheItems} 个文件缓存项。`
+    showToast(`缓存已清理：${result.snapshots} 份远程快照，${result.cacheItems} 个文件缓存项。`)
   } catch (error) {
     settingsError.value = friendlyError(error)
   } finally {
@@ -1336,7 +1463,7 @@ async function clearAllServerData() {
     operationJobs.value = {}
     serverDataConfirming.value = false
     await refresh()
-    notice.value = `${result.detail}：${result.servers} 台服务器、${result.deployments} 个部署关联、${result.jobs} 条任务记录。`
+    showToast(`${result.detail}：${result.servers} 台服务器、${result.deployments} 个部署关联、${result.jobs} 条任务记录。`)
   } catch (error) {
     settingsError.value = friendlyError(error)
   } finally {
@@ -1355,7 +1482,7 @@ async function trackJob(initial: JobView, onPoll?: () => Promise<void>) {
     if (onPoll) await onPoll()
   }
   if (current.status !== 'succeeded') throw new Error(current.error || '操作已取消，请刷新确认远端状态。')
-  notice.value = '操作完成，正在核对最新状态'
+  showToast('操作完成，正在核对最新状态', 'info')
 }
 
 function upsertDeployment(updated: DeploymentView) {
@@ -1514,7 +1641,7 @@ async function trustDialogSSHHostKey(target: 'create' | 'edit') {
     if (target === 'create') serverFormHostKey.value = value
     else serverCredentialHostKey.value = value
     dialogHostKeyConfirming.value = ''
-    notice.value = 'SSH 主机指纹已信任，请重新点击“测试 SSH”。'
+    showToast('SSH 主机指纹已信任，请重新点击“测试 SSH”。')
   } catch (error) {
     if (target === 'create') serverFormTestError.value = friendlyError(error)
     else serverCredentialTestError.value = friendlyError(error)
@@ -1571,7 +1698,7 @@ async function saveServerCredentials() {
     serverCredentialDialogOpen.value = false
     serverCredentialForm.password = ''
     serverCredentialForm.privateKeyPassphrase = ''
-    notice.value = serverCredentialForm.authMethod === 'agent' ? '服务器连接已更新。' : '服务器连接已更新，认证密钥已安全保存。'
+    showToast(serverCredentialForm.authMethod === 'agent' ? '服务器连接已更新。' : '服务器连接已更新，认证密钥已安全保存。')
   } catch (error) {
     serverCredentialTestError.value = friendlyError(error)
   } finally {
@@ -1626,7 +1753,7 @@ async function trustServerHostKey(id: string) {
     serverError.value = ''
     serverHostKeys.value[id] = await SystemService.TrustServerHostKey(id, hostKey.fingerprint) as unknown as HostKeyView
     hostKeyConfirmingID.value = ''
-    notice.value = '主机指纹已保存，可以重新检测服务器。'
+    showToast('主机指纹已保存，可以重新检测服务器。')
   } catch (error) {
     serverError.value = error instanceof Error ? error.message : String(error)
   } finally {
@@ -1989,6 +2116,223 @@ async function copyPullCommand(artifact: RegistryArtifactView) {
   }
 }
 
+async function loadDatabaseConnections() {
+  databaseLoading.value = true
+  try {
+    databaseError.value = ''
+    databaseConnections.value = await (SystemService as any).ListDatabaseConnections() as DatabaseConnectionView[]
+    if (selectedDatabaseID.value && !databaseConnections.value.some(connection => connection.id === selectedDatabaseID.value)) {
+      resetDatabaseBrowser()
+    }
+  } catch (error) {
+    databaseError.value = friendlyError(error)
+  } finally {
+    databaseLoading.value = false
+  }
+}
+
+function resetDatabaseBrowser() {
+  databaseOverviewRequestID++
+  selectedDatabaseID.value = ''
+  selectedDatabaseSchema.value = ''
+  databaseSchemas.value = []
+  databaseOverview.value = null
+  databaseOverviewLoading.value = false
+  databaseOverviewError.value = ''
+  databaseTables.value = []
+  selectedDatabaseTable.value = null
+  databaseColumns.value = []
+  databaseIndexes.value = []
+  databaseTablePage.value = null
+}
+
+function openDatabaseDialog(connection?: DatabaseConnectionView) {
+  databaseError.value = ''
+  databaseFormTestSuccess.value = ''
+  editingDatabaseID.value = connection?.id ?? ''
+  Object.assign(databaseForm, connection
+    ? { name: connection.name, driver: connection.driver, host: connection.host, port: connection.port, databaseName: connection.databaseName, username: connection.username, password: '', sslMode: connection.sslMode }
+    : emptyDatabaseForm())
+  databasePasswordVisible.value = false
+  databaseDialogOpen.value = true
+}
+
+function closeDatabaseDialog() {
+  if (!databaseSaving.value && !databaseFormTesting.value) databaseDialogOpen.value = false
+}
+
+function updateDatabaseDriverDefaults() {
+  const previousDefault = databaseForm.driver === 'postgres' ? 3306 : 5432
+  if (!databaseForm.port || databaseForm.port === previousDefault) databaseForm.port = databaseForm.driver === 'postgres' ? 5432 : 3306
+  databaseFormTestSuccess.value = ''
+}
+
+async function testDatabaseForm() {
+  if (databaseFormTesting.value) return
+  databaseFormTesting.value = true
+  databaseError.value = ''
+  databaseFormTestSuccess.value = ''
+  try {
+    await (SystemService as any).TestDatabaseConnection({ ...databaseForm })
+    databaseFormTestSuccess.value = '连接、认证和只读会话已验证。'
+  } catch (error) {
+    databaseError.value = friendlyError(error)
+  } finally {
+    databaseFormTesting.value = false
+  }
+}
+
+async function saveDatabaseConnection() {
+  if (databaseSaving.value) return
+  databaseSaving.value = true
+  databaseError.value = ''
+  try {
+    const saved = editingDatabaseID.value
+      ? await (SystemService as any).UpdateDatabaseConnection(editingDatabaseID.value, { ...databaseForm }) as DatabaseConnectionView
+      : await (SystemService as any).CreateDatabaseConnection({ ...databaseForm }) as DatabaseConnectionView
+    const index = databaseConnections.value.findIndex(connection => connection.id === saved.id)
+    if (index >= 0) databaseConnections.value[index] = saved
+    else databaseConnections.value.push(saved)
+    databaseConnections.value.sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'))
+    databaseDialogOpen.value = false
+    if (!editingDatabaseID.value) await selectDatabaseConnection(saved)
+    else if (selectedDatabaseID.value === saved.id) await selectDatabaseConnection(saved)
+  } catch (error) {
+    databaseError.value = friendlyError(error)
+  } finally {
+    databaseSaving.value = false
+  }
+}
+
+async function testSavedDatabaseConnection(connection: DatabaseConnectionView) {
+  if (savedDatabaseTestingID.value) return
+  savedDatabaseTestingID.value = connection.id
+  databaseError.value = ''
+  try {
+    await (SystemService as any).TestSavedDatabaseConnection(connection.id)
+    await loadDatabaseConnections()
+    showToast(`“${connection.name}”连接成功`)
+  } catch (error) {
+    databaseError.value = friendlyError(error)
+    await loadDatabaseConnections()
+  } finally {
+    savedDatabaseTestingID.value = ''
+  }
+}
+
+async function deleteDatabaseConnection(connection: DatabaseConnectionView) {
+  if (!window.confirm(`移除数据库连接“${connection.name}”？这不会修改远程数据库。`)) return
+  try {
+    await (SystemService as any).DeleteDatabaseConnection(connection.id)
+    databaseConnections.value = databaseConnections.value.filter(item => item.id !== connection.id)
+    if (selectedDatabaseID.value === connection.id) resetDatabaseBrowser()
+  } catch (error) {
+    databaseError.value = friendlyError(error)
+  }
+}
+
+async function selectDatabaseConnection(connection: DatabaseConnectionView) {
+  databaseOverviewRequestID++
+  selectedDatabaseID.value = connection.id
+  selectedDatabaseSchema.value = ''
+  databaseOverview.value = null
+  databaseOverviewLoading.value = false
+  databaseOverviewError.value = ''
+  databaseTables.value = []
+  selectedDatabaseTable.value = null
+  databaseColumns.value = []
+  databaseIndexes.value = []
+  databaseTablePage.value = null
+  databaseSchemaLoading.value = true
+  databaseError.value = ''
+  try {
+    databaseSchemas.value = await (SystemService as any).ListDatabaseSchemas(connection.id) as DatabaseSchemaView[]
+    const preferred = connection.driver === 'postgres' ? 'public' : connection.databaseName
+    const schema = databaseSchemas.value.find(item => item.name === preferred)?.name ?? databaseSchemas.value[0]?.name ?? ''
+    if (schema) await selectDatabaseSchema(schema)
+    else void loadDatabaseOverview(connection.id, '')
+  } catch (error) {
+    databaseError.value = friendlyError(error)
+  } finally {
+    databaseSchemaLoading.value = false
+  }
+}
+
+async function selectDatabaseSchema(schema: string) {
+  if (!selectedDatabaseID.value || databaseTableLoading.value) return
+  selectedDatabaseSchema.value = schema
+  void loadDatabaseOverview(selectedDatabaseID.value, schema)
+  selectedDatabaseTable.value = null
+  databaseColumns.value = []
+  databaseIndexes.value = []
+  databaseTablePage.value = null
+  databaseTableLoading.value = true
+  try {
+    databaseTables.value = await (SystemService as any).ListDatabaseTables(selectedDatabaseID.value, schema) as DatabaseTableView[]
+  } catch (error) {
+    databaseError.value = friendlyError(error)
+  } finally {
+    databaseTableLoading.value = false
+  }
+}
+
+async function loadDatabaseOverview(connectionID: string, schema: string) {
+  const requestID = ++databaseOverviewRequestID
+  databaseOverview.value = null
+  databaseOverviewLoading.value = true
+  databaseOverviewError.value = ''
+  try {
+    const overview = await (SystemService as any).GetDatabaseOverview(connectionID, schema) as DatabaseOverviewView
+    if (requestID === databaseOverviewRequestID && selectedDatabaseID.value === connectionID && selectedDatabaseSchema.value === schema) databaseOverview.value = overview
+  } catch (error) {
+    if (requestID === databaseOverviewRequestID) databaseOverviewError.value = friendlyError(error)
+  } finally {
+    if (requestID === databaseOverviewRequestID) databaseOverviewLoading.value = false
+  }
+}
+
+function formatDatabaseSize(value: number | null | undefined) {
+  if (value == null) return '—'
+  return value === 0 ? '0 B' : formatBytes(value)
+}
+
+async function selectDatabaseTable(table: DatabaseTableView) {
+  if (!selectedDatabaseID.value) return
+  selectedDatabaseTable.value = table
+  databaseDetailTab.value = 'columns'
+  databaseDetailLoading.value = true
+  databaseError.value = ''
+  try {
+    const [columns, indexes] = await Promise.all([
+      (SystemService as any).GetDatabaseTableColumns(selectedDatabaseID.value, table.schema, table.name) as Promise<DatabaseColumnView[]>,
+      (SystemService as any).GetDatabaseTableIndexes(selectedDatabaseID.value, table.schema, table.name) as Promise<DatabaseIndexView[]>,
+    ])
+    databaseColumns.value = columns
+    databaseIndexes.value = indexes
+    await loadDatabaseTablePage(1)
+  } catch (error) {
+    databaseError.value = friendlyError(error)
+  } finally {
+    databaseDetailLoading.value = false
+  }
+}
+
+async function loadDatabaseTablePage(page: number, sortColumn = databaseTablePage.value?.sortColumn ?? '', sortDesc = databaseTablePage.value?.sortDesc ?? false) {
+  const table = selectedDatabaseTable.value
+  if (!selectedDatabaseID.value || !table) return
+  try {
+    databaseTablePage.value = await (SystemService as any).GetDatabaseTableRows(selectedDatabaseID.value, table.schema, table.name, { page, pageSize: 100, sortColumn, sortDesc } as DatabaseTableQuery) as DatabaseTablePageView
+  } catch (error) {
+    databaseError.value = friendlyError(error)
+  }
+}
+
+async function toggleDatabaseSort(column: string) {
+  const current = databaseTablePage.value
+  const sortDesc = current?.sortColumn === column ? !current.sortDesc : false
+  await loadDatabaseTablePage(1, column, sortDesc)
+}
+
 async function runDiagnostic() {
   actionPending.value = true
   try {
@@ -2071,9 +2415,9 @@ onMounted(() => {
   }, 30000)
   document.addEventListener('keydown', modalKeyboard)
 })
-onUnmounted(() => { eventCleanups.forEach(off=>off()); window.clearInterval(refreshTimer); window.clearInterval(clockTimer); document.removeEventListener('keydown',modalKeyboard) })
+onUnmounted(() => { eventCleanups.forEach(off=>off()); window.clearInterval(refreshTimer); window.clearInterval(clockTimer); for (const timer of toastTimers.values()) window.clearTimeout(timer); toastTimers.clear(); document.removeEventListener('keydown',modalKeyboard) })
 
-const anyDialog = computed(()=>registryDialogOpen.value || serverDialogOpen.value || serverCredentialDialogOpen.value || workspaceProjectDialogOpen.value || dockerfileDialogOpen.value || deploymentDialogOpen.value || releaseDialogOpen.value)
+const anyDialog = computed(()=>registryDialogOpen.value || databaseDialogOpen.value || serverDialogOpen.value || serverCredentialDialogOpen.value || workspaceProjectDialogOpen.value || dockerfileDialogOpen.value || deploymentDialogOpen.value || releaseDialogOpen.value)
 let focusBeforeDialog: HTMLElement | null = null
 watch(anyDialog, async open => {
   if (open) {
@@ -2087,7 +2431,7 @@ watch(anyDialog, async open => {
 })
 function modalKeyboard(event: KeyboardEvent) {
   if (!anyDialog.value) return
-  if (event.key === 'Escape') { closeRegistryDialog(); closeServerDialog(); closeServerCredentialDialog(); closeWorkspaceProjectDialog(); closeDockerfileDialog(); closeDeploymentDialog(); closeReleaseDialog(); event.preventDefault() }
+  if (event.key === 'Escape') { closeRegistryDialog(); closeDatabaseDialog(); closeServerDialog(); closeServerCredentialDialog(); closeWorkspaceProjectDialog(); closeDockerfileDialog(); closeDeploymentDialog(); closeReleaseDialog(); event.preventDefault() }
   if (event.key !== 'Tab') return
   const elements = Array.from(document.querySelectorAll<HTMLElement>('.modal-backdrop button:not(:disabled), .modal-backdrop input:not(:disabled), .modal-backdrop select:not(:disabled), .modal-backdrop textarea:not(:disabled)')).filter(e=>e.getClientRects().length)
   const first=elements[0],last=elements[elements.length-1]
@@ -2098,9 +2442,10 @@ function modalKeyboard(event: KeyboardEvent) {
 watch(activeSection, (section) => {
   if (section === 'projects') void loadWorkspaceProjects()
   if (section === 'registries') void loadRegistries()
+  if (section === 'databases') void loadDatabaseConnections()
   if (section === 'servers') void loadServers()
   if (section === 'deployments') void refreshDeploymentsWithFeedback()
-  if (section === 'settings') void Promise.all([refresh(), loadServers(), loadDeployments(), loadAISettings()])
+  if (section === 'settings') void Promise.all([refresh(), loadServers(), loadDeployments(), loadAISettings(), loadCommandLineToolStatus()])
 })
 </script>
 
@@ -2136,6 +2481,10 @@ watch(activeSection, (section) => {
         <button class="nav-item" :class="{ active: activeSection === 'registries' }" :aria-current="activeSection === 'registries' ? 'page' : undefined" @click="activeSection = 'registries'">
           <svg viewBox="0 0 24 24"><path d="M12 2 2 7l10 5 8.18-4.09L22 7 12 2Zm-8 8.24V17l8 4 8-4v-6.76l-8 4-8-4Z"/></svg>
           镜像仓库
+        </button>
+        <button class="nav-item" :class="{ active: activeSection === 'databases' }" :aria-current="activeSection === 'databases' ? 'page' : undefined" @click="activeSection = 'databases'">
+          <svg viewBox="0 0 24 24"><path d="M12 3C7.03 3 3 4.79 3 7v10c0 2.21 4.03 4 9 4s9-1.79 9-4V7c0-2.21-4.03-4-9-4Zm0 2c4.11 0 7 .99 7 2s-2.89 2-7 2-7-.99-7-2 2.89-2 7-2Zm0 14c-4.11 0-7-.99-7-2v-2.05c1.65 1.03 4.43 1.55 7 1.55s5.35-.52 7-1.55V17c0 1.01-2.89 2-7 2Zm0-5c-4.11 0-7-.99-7-2V9.95c1.65 1.03 4.43 1.55 7 1.55s5.35-.52 7-1.55V12c0 1.01-2.89 2-7 2Z"/></svg>
+          数据库
         </button>
         <button class="nav-item settings-nav-item" :class="{ active: activeSection === 'settings' }" :aria-current="activeSection === 'settings' ? 'page' : undefined" @click="activeSection = 'settings'">
           <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.07-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96a7.1 7.1 0 0 0-1.62-.94L14.38 2.8a.49.49 0 0 0-.49-.4h-3.84a.49.49 0 0 0-.49.4L9.2 5.32c-.58.24-1.12.55-1.62.94l-2.39-.96a.48.48 0 0 0-.61.22L2.66 8.84a.49.49 0 0 0 .12.64l2.03 1.58c-.05.31-.09.64-.09.94s.03.63.08.94l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.12.22.37.31.61.22l2.39-.96c.5.39 1.05.71 1.62.94l.36 2.52c.04.24.25.4.49.4h3.84c.24 0 .44-.16.49-.4l.36-2.52c.58-.24 1.12-.55 1.62-.94l2.39.96c.24.09.49 0 .61-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.01-1.58ZM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5Z"/></svg>
@@ -2193,6 +2542,12 @@ watch(activeSection, (section) => {
             添加仓库
           </button>
         </div>
+        <div v-else-if="activeSection === 'databases'" class="topbar-actions">
+          <button class="icon-button" :class="{ refreshing: databaseLoading }" :disabled="databaseLoading" title="刷新数据库连接" aria-label="刷新数据库连接" @click="loadDatabaseConnections">
+            <svg class="refresh-icon" viewBox="0 0 24 24"><path d="M17.65 6.35A8 8 0 1 0 20 12h-2a6 6 0 1 1-1.76-4.24L13 11h8V3l-3.35 3.35Z"/></svg>
+          </button>
+          <button class="primary-button" @click="openDatabaseDialog()"><span class="button-indicator"></span>添加数据库</button>
+        </div>
         <div v-else-if="activeSection === 'projects'" class="topbar-actions">
           <button class="icon-button" :class="{ refreshing }" :disabled="refreshing" title="刷新项目" aria-label="刷新项目" @click="refreshWorkspaceProjects">
             <svg class="refresh-icon" viewBox="0 0 24 24"><path d="M17.65 6.35A8 8 0 1 0 20 12h-2a6 6 0 1 1-1.76-4.24L13 11h8V3l-3.35 3.35Z"/></svg>
@@ -2214,12 +2569,6 @@ watch(activeSection, (section) => {
           <button class="primary-button" @click="openServerDialog"><span class="button-indicator"></span>添加服务器</button>
         </div>
       </header>
-
-      <div v-if="errorMessage" class="error-banner">
-        <strong>本地核心返回错误</strong>
-        <span>{{ errorMessage }}</span>
-      </div>
-      <div v-if="notice" class="notice-banner" role="status">{{ notice }}<button class="text-button" @click="notice = ''" aria-label="关闭提示">关闭</button></div>
 
       <template v-if="activeSection === 'overview'">
       <section class="summary-grid" aria-label="系统概况">
@@ -2316,7 +2665,6 @@ watch(activeSection, (section) => {
           </ol>
         </div>
         <div v-if="Object.values(operationJobs).length" class="operation-feedback" aria-live="polite"><div v-for="task in Object.values(operationJobs)" :key="task.id"><span class="job-status" :class="task.status">{{ statusLabel[task.status] }}</span> {{ task.error || task.message }}<progress v-if="['queued','running','canceling'].includes(task.status)" :value="task.progress" max="100" /></div></div>
-        <div v-if="deploymentError" class="error-banner registry-error"><strong>部署项目操作失败</strong><span>{{ deploymentError }}</span></div>
         <section class="deployment-summary-grid" aria-label="部署项目概况">
           <article class="registry-summary-card"><span>部署目标</span><strong>{{ deployments.length }}</strong><small>本地项目与远程服务器的关联</small></article>
           <article class="registry-summary-card healthy"><span>运行正常</span><strong>{{ runningDeployments }}</strong><small>所有匹配的远程服务均在运行</small></article>
@@ -2398,7 +2746,6 @@ watch(activeSection, (section) => {
       </section>
 
       <section v-else-if="activeSection === 'servers'" class="server-page" aria-label="开发服务器">
-        <div v-if="serverError" class="error-banner registry-error"><strong>服务器操作失败</strong><span>{{ serverError }}</span></div>
         <section class="server-summary-grid" aria-label="服务器概况">
           <article class="registry-summary-card"><span>已添加服务器</span><strong>{{ servers.length }}</strong><small>本地保存 SSH 连接元数据</small></article>
           <article class="registry-summary-card healthy"><span>可用服务器</span><strong>{{ servers.filter((server) => server.status === 'healthy').length }}</strong><small>SSH 与 Docker 最近检测</small></article>
@@ -2447,10 +2794,6 @@ watch(activeSection, (section) => {
       </section>
 
       <section v-else-if="activeSection === 'projects'" class="workspace-project-page" aria-label="项目">
-        <div v-if="workspaceProjectError" class="error-banner registry-error">
-          <strong>项目操作失败</strong><span>{{ workspaceProjectError }}</span>
-        </div>
-
         <template v-if="workspaceProjectPage === 'list'">
           <section class="project-summary-grid" aria-label="项目概况">
             <article class="registry-summary-card"><span>项目总数</span><strong>{{ workspaceProjects.length }}</strong><small>本地持久化的项目配置</small></article>
@@ -2521,11 +2864,6 @@ watch(activeSection, (section) => {
       </section>
 
       <section v-else-if="activeSection === 'registries'" class="registry-page" aria-label="镜像仓库">
-        <div v-if="registryError" class="error-banner registry-error">
-          <strong>镜像仓库操作失败</strong>
-          <span>{{ registryError }}</span>
-        </div>
-
         <template v-if="registryPage === 'connections'">
         <section class="registry-summary-grid" aria-label="仓库概况">
           <article class="registry-summary-card">
@@ -2682,12 +3020,76 @@ watch(activeSection, (section) => {
         <p class="registry-footnote">Harbor 显示项目空间下的制品 Digest 与 Tag；标准 OCI Registry 显示 catalog 与 Tag。制品行会复制可直接执行的 docker pull 命令。</p>
       </section>
 
+      <section v-else-if="activeSection === 'databases'" class="database-page" aria-label="远程数据库">
+        <div class="database-overview" aria-label="数据库概况"><span><strong>{{ databaseConnections.length }}</strong> 个已保存连接</span><span class="database-overview-divider"></span><span class="database-readonly-indicator">只读浏览</span><span class="database-overview-note">选择连接和数据库后查看表结构与数据</span></div>
+        <section class="database-browser-layout" :class="{ collapsed: databaseConnectionsCollapsed }">
+          <article class="panel database-connections-panel" :class="{ collapsed: databaseConnectionsCollapsed }">
+            <div class="panel-header"><div class="database-panel-title" :aria-hidden="databaseConnectionsCollapsed"><span class="section-kicker">CONNECTIONS</span><h2>数据库连接</h2></div><button type="button" class="database-collapse-button" :aria-label="databaseConnectionsCollapsed ? '展开数据库连接' : '收起数据库连接'" :title="databaseConnectionsCollapsed ? '展开数据库连接' : '收起数据库连接'" :aria-expanded="!databaseConnectionsCollapsed" @click="databaseConnectionsCollapsed = !databaseConnectionsCollapsed">{{ databaseConnectionsCollapsed ? '›' : '‹' }}</button></div>
+            <Transition name="database-content" mode="out-in">
+              <div v-if="databaseConnectionsCollapsed" key="collapsed" class="database-collapsed-summary"><span>{{ databaseConnections.length }}</span><strong>数据库连接</strong></div>
+              <div v-else key="expanded" class="database-connections-content">
+                <div v-if="databaseLoading" class="registry-empty">正在读取数据库连接…</div>
+                <div v-else-if="!databaseConnections.length" class="registry-empty"><div class="empty-icon">◫</div><strong>还没有数据库连接</strong><span>添加 PostgreSQL、MySQL 或 MariaDB 连接后，即可只读浏览表结构和数据。</span><button class="secondary-button" @click="openDatabaseDialog()">添加第一个连接</button></div>
+                <div v-else class="database-connection-list">
+              <article v-for="connection in databaseConnections" :key="connection.id" class="database-connection-row" :class="{ selected: selectedDatabaseID === connection.id }">
+                <button class="database-connection-main" :aria-pressed="selectedDatabaseID === connection.id" @click="selectDatabaseConnection(connection)">
+                  <span class="registry-kind" :class="connection.driver">{{ connection.driver === 'postgres' ? 'PG' : 'MY' }}</span>
+                  <span><strong :title="connection.name">{{ connection.name }}</strong><code :title="`${connection.username}@${connection.host}:${connection.port}${connection.databaseName ? `/${connection.databaseName}` : ''}`">{{ connection.host }}:{{ connection.port }}{{ connection.databaseName ? ` / ${connection.databaseName}` : '' }}</code><small :class="{ error: connection.lastError }" :title="connection.lastError || ''">{{ connection.lastError || (connection.lastConnectedAt ? `已连接 · ${formatShortTime(connection.lastConnectedAt)}` : '尚未测试连接') }}</small></span>
+                </button>
+                <div class="database-connection-actions"><button class="text-button" :disabled="savedDatabaseTestingID === connection.id" @click="testSavedDatabaseConnection(connection)">{{ savedDatabaseTestingID === connection.id ? '测试中' : '测试连接' }}</button><button class="text-button" @click="openDatabaseDialog(connection)">编辑</button><button class="text-button danger-text" @click="deleteDatabaseConnection(connection)">移除</button></div>
+              </article>
+                </div>
+              </div>
+            </Transition>
+          </article>
+          <article class="panel database-explorer-panel">
+            <div class="panel-header"><div><span class="section-kicker">READ-ONLY EXPLORER</span><h2 :title="selectedDatabaseConnection?.name || ''">{{ selectedDatabaseConnection?.name || '数据库资源管理器' }}</h2></div><span v-if="selectedDatabaseConnection" class="platform-badge">{{ databaseDriverLabel[selectedDatabaseConnection.driver] }}</span></div>
+            <div v-if="!selectedDatabaseConnection" class="registry-empty"><div class="empty-icon">←</div><strong>选择一个数据库连接</strong><span>iDeploy 会读取可见的 Schema、表、字段、索引和受限分页数据。</span></div>
+            <template v-else>
+              <div class="database-explorer-toolbar" aria-label="数据库概况">
+                <label class="database-schema-select">{{ selectedDatabaseConnection.driver === 'mysql' ? '数据库' : 'Schema' }}<select :value="selectedDatabaseSchema" :disabled="databaseSchemaLoading || databaseTableLoading" @change="selectDatabaseSchema(($event.target as HTMLSelectElement).value)"><option v-for="schema in databaseSchemas" :key="schema.name" :value="schema.name">{{ schema.name }}</option></select></label>
+                <span class="database-object-count">{{ databaseSchemaLoading || databaseTableLoading ? '正在读取对象…' : `${databaseTables.length} 个表或视图` }}</span>
+                <span class="database-toolbar-divider" aria-hidden="true"></span>
+                <span class="database-info-item"><span>版本</span><strong :title="databaseOverview?.version || databaseOverviewError">{{ databaseOverviewLoading ? '读取中…' : (databaseOverview?.version || '—') }}</strong></span>
+                <span class="database-info-item"><span>{{ selectedDatabaseConnection.driver === 'mysql' ? '当前库大小' : '数据库大小' }}</span><strong :title="databaseOverview?.sizeDetail || databaseOverviewError">{{ databaseOverviewLoading ? '读取中…' : formatDatabaseSize(databaseOverview?.databaseSizeBytes) }}</strong><span class="database-info-help-wrap"><button type="button" class="database-info-help" aria-label="查看数据库大小说明">?</button><span class="database-help-tooltip" role="tooltip">{{ databaseOverview?.sizeDetail || databaseOverviewError || '数据与索引占用，不是实例磁盘容量。' }}</span></span></span>
+                <button type="button" class="database-metrics-refresh" :disabled="databaseOverviewLoading" title="刷新数据库概况" aria-label="刷新数据库概况" @click="loadDatabaseOverview(selectedDatabaseID, selectedDatabaseSchema)">↻</button>
+              </div>
+              <div class="database-explorer-body">
+                <aside class="database-table-tree"><div class="database-tree-heading">表与视图 <span>{{ databaseTables.length }}</span></div><button v-for="table in databaseTables" :key="`${table.schema}.${table.name}`" class="database-table-item" :class="{ selected: selectedDatabaseTable?.schema === table.schema && selectedDatabaseTable?.name === table.name }" :title="table.name" @click="selectDatabaseTable(table)"><span>{{ table.type === 'VIEW' ? '◱' : '▦' }}</span><strong>{{ table.name }}</strong><small>{{ table.type === 'VIEW' ? '视图' : '表' }}</small></button><div v-if="!databaseTableLoading && !databaseTables.length" class="database-tree-empty">当前数据库中没有可读取的表或视图。</div></aside>
+                <section class="database-table-detail">
+                  <div v-if="!selectedDatabaseTable" class="registry-empty"><strong>选择一张表</strong><span>查看字段定义、索引和分页数据。</span></div>
+                  <template v-else>
+                    <div class="database-detail-heading"><span>{{ selectedDatabaseTable.type === 'VIEW' ? '视图' : '数据表' }}</span><strong :title="`${selectedDatabaseTable.schema}.${selectedDatabaseTable.name}`">{{ selectedDatabaseTable.name }}</strong></div>
+                    <div class="database-detail-tabs"><button :class="{ active: databaseDetailTab === 'columns' }" @click="databaseDetailTab='columns'">字段 {{ databaseColumns.length }}</button><button :class="{ active: databaseDetailTab === 'data' }" @click="databaseDetailTab='data'">数据</button><button :class="{ active: databaseDetailTab === 'indexes' }" @click="databaseDetailTab='indexes'">索引 {{ databaseIndexes.length }}</button></div>
+                    <div v-if="databaseDetailLoading" class="registry-empty">正在读取表结构与数据…</div>
+                    <div v-else-if="databaseDetailTab === 'columns'" class="database-scroll"><table class="database-metadata-table"><thead><tr><th>字段</th><th>类型</th><th>可空</th><th>默认值</th><th>说明</th></tr></thead><tbody><tr v-for="column in databaseColumns" :key="column.name"><td><code>{{ column.name }}</code><span v-if="column.primaryKey" class="database-key-label">PK</span></td><td>{{ column.dataType }}</td><td>{{ column.nullable ? '是' : '否' }}</td><td><code>{{ column.defaultValue || '—' }}</code></td><td>{{ column.comment || '—' }}</td></tr></tbody></table></div>
+                    <div v-else-if="databaseDetailTab === 'indexes'" class="database-index-list"><div v-if="!databaseIndexes.length" class="database-tree-empty">未读取到索引。</div><article v-for="index in databaseIndexes" :key="index.name"><strong>{{ index.name }}</strong><span>{{ index.unique ? '唯一索引' : '普通索引' }}</span><code>{{ index.columns.join(', ') }}</code></article></div>
+                    <div v-else class="database-data-pane"><p>每页最多读取 100 行；点击字段名可排序。单元格最大显示 4,096 个字符。</p><div class="database-scroll"><table class="database-data-table"><thead><tr><th v-for="column in databaseTablePage?.columns ?? databaseColumns" :key="column.name"><button @click="toggleDatabaseSort(column.name)">{{ column.name }} <span v-if="databaseTablePage?.sortColumn === column.name">{{ databaseTablePage.sortDesc ? '↓' : '↑' }}</span></button></th></tr></thead><tbody><tr v-for="(row, index) in databaseTablePage?.rows ?? []" :key="index"><td v-for="column in databaseTablePage?.columns ?? databaseColumns" :key="column.name" :title="row[column.name]"><code :class="{ null: row[column.name] === 'NULL' }">{{ row[column.name] }}</code></td></tr><tr v-if="!(databaseTablePage?.rows?.length)"><td :colspan="Math.max(databaseColumns.length, 1)">没有可显示的数据。</td></tr></tbody></table></div><div class="database-pagination"><span>第 {{ databaseTablePage?.page ?? 1 }} 页</span><div><button class="text-button" :disabled="!databaseTablePage || databaseTablePage.page <= 1" @click="loadDatabaseTablePage((databaseTablePage?.page ?? 1) - 1)">上一页</button><button class="text-button" :disabled="!databaseTablePage?.hasNext" @click="loadDatabaseTablePage((databaseTablePage?.page ?? 1) + 1)">下一页</button></div></div></div>
+                  </template>
+                </section>
+              </div>
+            </template>
+          </article>
+        </section>
+        <p class="registry-footnote">建议使用只读数据库账号。密码仅保存在 macOS 系统钥匙串。</p>
+      </section>
+
       <section v-else-if="activeSection === 'settings'" class="settings-page" aria-label="设置">
-        <div v-if="settingsError" class="error-banner registry-error"><strong>清理失败</strong><span>{{ settingsError }}</span></div>
         <section class="settings-summary-grid" aria-label="本地数据概况">
           <article class="registry-summary-card"><span>服务器连接</span><strong>{{ servers.length }}</strong><small>保存在本地数据库中的 SSH 配置</small></article>
           <article class="registry-summary-card"><span>部署关联</span><strong>{{ deployments.length }}</strong><small>项目与服务器之间的运行绑定</small></article>
           <article class="registry-summary-card"><span>活动任务</span><strong>{{ overview?.activeJobs ?? 0 }}</strong><small>有服务器任务执行时禁止清除</small></article>
+        </section>
+
+        <section class="panel settings-panel">
+          <div class="panel-header"><div><span class="section-kicker">COMMAND LINE</span><h2>终端集成</h2></div><span class="platform-badge">macOS</span></div>
+          <div class="settings-list">
+            <div class="settings-row">
+              <div class="settings-icon">›_</div>
+              <div class="settings-copy"><strong>ideploy 命令</strong><span>{{ commandLineTool?.detail || '正在检查终端命令…' }}</span><code :title="commandLineTool?.commandPath">{{ commandLineTool?.commandPath || '/usr/local/bin/ideploy' }}</code><small>命令与桌面端共享项目、服务器、镜像仓库、发布记录和 Keychain 凭据；安装时 macOS 会请求管理员授权。</small></div>
+              <button class="secondary-button" :disabled="commandLineToolInstalling || commandLineTool?.installed || commandLineTool?.conflict" @click="installCommandLineTool">{{ commandLineToolInstalling ? '安装中…' : commandLineTool?.installed ? '已安装' : commandLineTool?.conflict ? '路径被占用' : '安装命令' }}</button>
+            </div>
+          </div>
         </section>
 
         <section class="panel settings-panel">
@@ -2879,6 +3281,21 @@ watch(activeSection, (section) => {
         </form>
       </div>
 
+      <div v-if="databaseDialogOpen" class="modal-backdrop" @click.self="closeDatabaseDialog">
+        <form class="registry-dialog database-connection-dialog" @submit.prevent="saveDatabaseConnection">
+          <div class="dialog-heading"><div><span class="section-kicker">READ-ONLY DATABASE</span><h2>{{ editingDatabaseID ? '编辑数据库连接' : '添加数据库连接' }}</h2></div><button type="button" class="dialog-close" aria-label="关闭" @click="closeDatabaseDialog">×</button></div>
+          <div class="form-section-heading"><span>连接信息</span><small>请使用仅拥有读取权限的数据库账号</small></div>
+          <label class="form-field"><span>显示名称</span><input v-model.trim="databaseForm.name" autocomplete="off" maxlength="80" placeholder="例如：生产订单库" required @input="databaseFormTestSuccess=''" /></label>
+          <div class="server-form-grid"><label class="form-field"><span>数据库类型</span><select v-model="databaseForm.driver" @change="updateDatabaseDriverDefaults"><option value="postgres">PostgreSQL</option><option value="mysql">MySQL / MariaDB</option></select></label><label class="form-field"><span>TLS</span><select v-model="databaseForm.sslMode"><option value="require">启用加密</option><option value="disable">不加密</option></select></label></div>
+          <div class="server-address-grid"><label class="form-field"><span>主机名或 IP</span><input v-model.trim="databaseForm.host" autocomplete="off" placeholder="db.example.com" required @input="databaseFormTestSuccess=''" /></label><label class="form-field"><span>端口</span><input v-model.number="databaseForm.port" type="number" min="1" max="65535" required @input="databaseFormTestSuccess=''" /></label></div>
+          <div class="server-form-grid"><label class="form-field"><span>数据库名称 <small>MySQL 可选</small></span><input v-model.trim="databaseForm.databaseName" autocomplete="off" placeholder="留空后连接并选择数据库" :required="databaseForm.driver === 'postgres'" @input="databaseFormTestSuccess=''" /><small v-if="databaseForm.driver === 'mysql'">留空后可选择数据库。</small><small v-else>PostgreSQL 连接必须指定一个数据库。</small></label><label class="form-field"><span>用户名</span><input v-model.trim="databaseForm.username" autocomplete="username" placeholder="readonly_user" required @input="databaseFormTestSuccess=''" /></label></div>
+          <label class="form-field"><span>数据库密码</span><div class="secret-input"><input v-model="databaseForm.password" :type="databasePasswordVisible ? 'text' : 'password'" autocomplete="new-password" :placeholder="editingDatabaseID ? '留空继续使用系统钥匙串中的密码' : '输入数据库密码'" :required="!editingDatabaseID" @input="databaseFormTestSuccess=''" /><button type="button" :aria-label="databasePasswordVisible ? '隐藏数据库密码' : '显示数据库密码'" @click="databasePasswordVisible = !databasePasswordVisible">{{ databasePasswordVisible ? '隐藏' : '显示' }}</button></div><small>密码仅保存在 macOS 系统钥匙串，不会写入 iDeploy 的 SQLite 数据库。</small></label>
+          <div v-if="databaseError" class="form-probe-result error" role="alert">{{ databaseError }}</div><div v-else-if="databaseFormTestSuccess" class="form-probe-result healthy" role="status"><strong>连接成功</strong><span>{{ databaseFormTestSuccess }}</span></div>
+          <div class="dialog-security-note">此模块只会读取元数据和受限分页数据。请为生产环境创建权限最小化的只读账号；关闭 TLS 会降低网络传输安全性。</div>
+          <div class="dialog-actions"><button type="button" class="secondary-button" :disabled="databaseSaving || databaseFormTesting" @click="closeDatabaseDialog">取消</button><button type="button" class="secondary-button" :disabled="databaseSaving || databaseFormTesting || !databaseForm.host || (databaseForm.driver === 'postgres' && !databaseForm.databaseName) || !databaseForm.username || (!editingDatabaseID && !databaseForm.password)" @click="testDatabaseForm">{{ databaseFormTesting ? '测试中' : '测试连接' }}</button><button type="submit" class="primary-button" :disabled="databaseSaving || databaseFormTesting">{{ databaseSaving ? '保存中' : '保存连接' }}</button></div>
+        </form>
+      </div>
+
       <div v-if="serverDialogOpen" class="modal-backdrop" @click.self="closeServerDialog">
         <form class="registry-dialog server-connection-dialog" @submit.prevent="createServer">
           <div class="dialog-heading"><div><span class="section-kicker">NEW REMOTE HOST</span><h2>添加开发服务器</h2></div><button type="button" class="dialog-close" aria-label="关闭" @click="closeServerDialog">×</button></div>
@@ -2937,5 +3354,12 @@ watch(activeSection, (section) => {
         </form>
       </div>
     </main>
+    <div class="toast-stack" aria-live="polite" aria-atomic="false">
+      <div v-for="toast in toasts" :key="toast.id" class="app-toast" :class="toast.kind" :role="toast.kind === 'error' ? 'alert' : 'status'">
+        <span class="toast-icon" aria-hidden="true">{{ toast.kind === 'success' ? '✓' : toast.kind === 'error' ? '!' : 'i' }}</span>
+        <span class="toast-message">{{ toast.message }}</span>
+        <button type="button" class="toast-dismiss" aria-label="关闭提示" @click="dismissToast(toast.id)">×</button>
+      </div>
+    </div>
   </div>
 </template>

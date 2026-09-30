@@ -16,6 +16,89 @@ export interface CleanupView {
     "detail": string;
 }
 
+export interface CommandLineToolStatus {
+    "installed": boolean;
+    "conflict": boolean;
+    "commandPath": string;
+    "executablePath": string;
+    "detail": string;
+}
+
+export interface DatabaseColumnView {
+    "name": string;
+    "dataType": string;
+    "nullable": boolean;
+    "defaultValue": string;
+    "primaryKey": boolean;
+    "comment": string;
+}
+
+export interface DatabaseConnectionInput {
+    "name": string;
+    "driver": string;
+    "host": string;
+    "port": number;
+    "databaseName": string;
+    "username": string;
+    "password": string;
+    "sslMode": string;
+}
+
+export interface DatabaseConnectionView {
+    "id": string;
+    "name": string;
+    "driver": string;
+    "host": string;
+    "port": number;
+    "databaseName": string;
+    "username": string;
+    "sslMode": string;
+    "credentialConfigured": boolean;
+    "createdAt": string;
+    "updatedAt": string;
+    "lastConnectedAt": string;
+    "lastError": string;
+}
+
+export interface DatabaseIndexView {
+    "name": string;
+    "columns": string[] | null;
+    "unique": boolean;
+}
+
+export interface DatabaseOverviewView {
+    "version": string;
+    "databaseSizeBytes": number | null;
+    "sizeDetail": string;
+}
+
+export interface DatabaseSchemaView {
+    "name": string;
+}
+
+export interface DatabaseTablePageView {
+    "columns": DatabaseColumnView[] | null;
+    "rows": ({ [_ in string]?: string } | null)[] | null;
+    "page": number;
+    "pageSize": number;
+    "hasNext": boolean;
+    "sortColumn": string;
+    "sortDesc": boolean;
+}
+
+export interface DatabaseTableQuery {
+    "page": number;
+    "pageSize": number;
+    "sortColumn": string;
+    "sortDesc": boolean;
+}
+
+export interface DatabaseTableView {
+    "schema": string;
+    "name": string;
+    "type": string;
+}
+
 export interface DeploymentInput {
     "workloadKind": string;
     "workloadName": string;

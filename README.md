@@ -10,6 +10,7 @@ iDeploy 是面向 macOS 的单用户 Docker 交付与远程运维桌面应用。
 - 单容器发布使用项目 Dockerfile 和目标镜像，运行端口与重启策略保存在部署配置中；端口可只填写外部端口，发布时会根据 Dockerfile 的 `EXPOSE` 自动补全内部端口；
 - Compose 发布要求 `image` 使用 `${IMAGE_TAG}`，发布时保存 Compose 快照以保证历史版本可重放；
 - Harbor / OCI 用户名保存在 SQLite，密码或 Token 保存在 macOS Keychain；
+- “数据库”页可使用独立的只读 PostgreSQL、MySQL / MariaDB 账号查看远程 Schema、表、字段、索引和受限分页数据；连接密码仅保存在 macOS Keychain；
 - 镜像仓库登录通过标准输入完成，不把密码写入任务参数或命令行；
 - 发布与回滚由服务器级互斥任务执行，完成后核对 Docker 运行状态和容器健康检查。
 
@@ -41,6 +42,33 @@ wails3 dev
 ```
 
 如果 `wails3` 不在 `PATH` 中，可直接运行 `$(go env GOPATH)/bin/wails3`。
+
+## 终端调用
+
+安装 `iDeploy.app` 后，在应用的“设置 → 终端集成”中安装 `ideploy` 命令。命令行与桌面端共享项目、服务器、镜像仓库、部署记录和 macOS Keychain 凭据：桌面端运行时通过当前用户专属的 Unix Socket 请求桌面后台执行；桌面端未运行时由 CLI 无界面执行。
+
+```bash
+ideploy doctor
+ideploy deployment list --json
+ideploy deployment publish <deployment-id> \
+  --registry <registry-id> \
+  --version v1.2.3 \
+  --wait \
+  --json
+```
+
+`--json` 始终返回 `{ "ok": ..., "data": ... }` 或 `{ "ok": false, "code": ..., "error": ... }`，适合其他应用读取。发布、回滚和运维命令默认等待任务结束并用退出码表示最终结果；`--no-wait` 需要 `iDeploy.app` 正在运行，以确保后台任务拥有持续运行的执行器。完整命令见 [`docs/CLI.md`](docs/CLI.md)。
+
+## AI / MCP 调用
+
+iDeploy 同一二进制内置 stdio MCP Server。安装终端命令后，本机 Codex 或其他支持 MCP 的 AI 客户端可以直接调用结构化的查询、发布、回滚、启停和任务工具：
+
+```bash
+codex mcp add ideploy -- /usr/local/bin/ideploy mcp
+codex mcp list
+```
+
+MCP 与 CLI 共享 Runtime Broker：桌面端运行时通过 Unix Socket 执行，桌面端未运行时为单次同步调用启动 Headless Runtime。服务不监听网络端口，也不会向 AI 返回 Registry、SSH 或 Keychain 凭据。工具清单、配置和安全边界见 [`docs/MCP.md`](docs/MCP.md)。
 
 ## 验证
 
@@ -79,6 +107,9 @@ Actions 自动测试并构建 macOS 13+ Universal 应用（arm64 + Intel x86_64�
 - `internal/platform`：数据库和本地路径基础设施；
 - `migrations`：数据库迁移；
 - `frontend`：Vue 桌面界面；
+- `cli.go`、`cli_control.go`：终端命令及本地控制通道；
+- `mcp.go`：stdio MCP Server、工具 Schema 与业务请求映射；
+- `runtime_broker.go`：CLI 与 MCP 共用的桌面/Headless Runtime 调度；
 - `docs/PROJECT_PLAN.md`：产品与工程总体规划。
 
 应用数据默认保存在 `~/Library/Application Support/iDeploy/`，日志保存在 `~/Library/Logs/iDeploy/`。

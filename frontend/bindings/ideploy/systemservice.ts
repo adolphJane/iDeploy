@@ -43,6 +43,10 @@ export function ConfigureDeployment(id: string, input: $models.DeploymentInput):
     return $Call.ByID(3316019355, id, input);
 }
 
+export function CreateDatabaseConnection(input: $models.DatabaseConnectionInput): $CancellablePromise<$models.DatabaseConnectionView> {
+    return $Call.ByID(2606033797, input);
+}
+
 export function CreateDeployment(input: $models.DeploymentInput): $CancellablePromise<$models.DeploymentView> {
     return $Call.ByID(3934653851, input);
 }
@@ -57,6 +61,10 @@ export function CreateRegistry(input: $models.RegistryInput): $CancellablePromis
 
 export function CreateServer(input: $models.ServerInput): $CancellablePromise<$models.ServerView> {
     return $Call.ByID(224755607, input);
+}
+
+export function DeleteDatabaseConnection(id: string): $CancellablePromise<void> {
+    return $Call.ByID(2418254010, id);
 }
 
 /**
@@ -96,6 +104,26 @@ export function GetAISettings(): $CancellablePromise<$models.AISettingsView> {
     return $Call.ByID(2968732991);
 }
 
+export function GetCommandLineToolStatus(): $CancellablePromise<$models.CommandLineToolStatus> {
+    return $Call.ByID(4079405747);
+}
+
+export function GetDatabaseOverview(id: string, schema: string): $CancellablePromise<$models.DatabaseOverviewView> {
+    return $Call.ByID(2452678, id, schema);
+}
+
+export function GetDatabaseTableColumns(id: string, schema: string, table: string): $CancellablePromise<$models.DatabaseColumnView[] | null> {
+    return $Call.ByID(1772677270, id, schema, table);
+}
+
+export function GetDatabaseTableIndexes(id: string, schema: string, table: string): $CancellablePromise<$models.DatabaseIndexView[] | null> {
+    return $Call.ByID(3282383165, id, schema, table);
+}
+
+export function GetDatabaseTableRows(id: string, schema: string, table: string, input: $models.DatabaseTableQuery): $CancellablePromise<$models.DatabaseTablePageView> {
+    return $Call.ByID(536392694, id, schema, table, input);
+}
+
 export function GetJob(id: string): $CancellablePromise<$models.JobView> {
     return $Call.ByID(1308345887, id);
 }
@@ -114,6 +142,26 @@ export function InspectSSHHostKey(input: $models.SSHHostKeyInput): $CancellableP
 
 export function InspectServerHostKey(id: string): $CancellablePromise<$models.HostKeyView> {
     return $Call.ByID(2050529560, id);
+}
+
+export function InstallCommandLineTool(): $CancellablePromise<$models.CommandLineToolStatus> {
+    return $Call.ByID(2135840340);
+}
+
+/**
+ * ListDatabaseConnections returns locally saved remote database profiles. The
+ * password is intentionally never exposed to the frontend.
+ */
+export function ListDatabaseConnections(): $CancellablePromise<$models.DatabaseConnectionView[] | null> {
+    return $Call.ByID(110217470);
+}
+
+export function ListDatabaseSchemas(id: string): $CancellablePromise<$models.DatabaseSchemaView[] | null> {
+    return $Call.ByID(1125982207, id);
+}
+
+export function ListDatabaseTables(id: string, schema: string): $CancellablePromise<$models.DatabaseTableView[] | null> {
+    return $Call.ByID(517597860, id, schema);
 }
 
 export function ListDeploymentReleases(deploymentID: string): $CancellablePromise<$models.DeploymentReleaseView[] | null> {
@@ -180,12 +228,20 @@ export function SaveGeneratedDockerfile(input: $models.DockerfileSaveInput): $Ca
     return $Call.ByID(587226264, input);
 }
 
+export function TestDatabaseConnection(input: $models.DatabaseConnectionInput): $CancellablePromise<void> {
+    return $Call.ByID(3217121861, input);
+}
+
 export function TestRegistry(id: string): $CancellablePromise<$models.JobView> {
     return $Call.ByID(1325963971, id);
 }
 
 export function TestRegistryConnection(input: $models.RegistryInput): $CancellablePromise<$models.RegistryProbeView> {
     return $Call.ByID(3340694707, input);
+}
+
+export function TestSavedDatabaseConnection(id: string): $CancellablePromise<void> {
+    return $Call.ByID(3863175998, id);
 }
 
 export function TestSavedServerConnection(id: string): $CancellablePromise<$models.ServerConnectionTestView> {
@@ -206,6 +262,10 @@ export function TrustSSHHostKey(input: $models.SSHHostKeyInput, fingerprint: str
 
 export function TrustServerHostKey(id: string, fingerprint: string): $CancellablePromise<$models.HostKeyView> {
     return $Call.ByID(3474427918, id, fingerprint);
+}
+
+export function UpdateDatabaseConnection(id: string, input: $models.DatabaseConnectionInput): $CancellablePromise<$models.DatabaseConnectionView> {
+    return $Call.ByID(4010241084, id, input);
 }
 
 export function UpdateProject(id: string, input: $models.ProjectInput): $CancellablePromise<$models.ProjectView> {
