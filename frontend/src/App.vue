@@ -560,6 +560,17 @@ const deepSeekKeyVisible = ref(false)
 const aiSettingsSaving = ref(false)
 const commandLineTool = ref<CommandLineToolStatus | null>(null)
 const commandLineToolInstalling = ref(false)
+const copiedMCPConfig = ref<'codex' | 'json' | 'verify' | ''>('')
+const mcpCommandPath = computed(() => commandLineTool.value?.commandPath || '/usr/local/bin/ideploy')
+const mcpCodexCommand = computed(() => `codex mcp add ideploy -- ${mcpCommandPath.value} mcp`)
+const mcpClientConfig = computed(() => JSON.stringify({
+  mcpServers: {
+    ideploy: {
+      command: mcpCommandPath.value,
+      args: ['mcp'],
+    },
+  },
+}, null, 2))
 const cacheCleaning = ref(false)
 const serverDataClearing = ref(false)
 const serverDataConfirming = ref(false)
@@ -728,6 +739,24 @@ async function installCommandLineTool() {
     settingsError.value = error instanceof Error ? error.message : String(error)
   } finally {
     commandLineToolInstalling.value = false
+  }
+}
+
+async function copyMCPConfig(kind: 'codex' | 'json' | 'verify') {
+  const content = kind === 'codex'
+    ? mcpCodexCommand.value
+    : kind === 'json'
+      ? mcpClientConfig.value
+      : 'codex mcp list'
+  try {
+    await Clipboard.SetText(content)
+    copiedMCPConfig.value = kind
+    showToast(kind === 'json' ? '通用 MCP 配置已复制' : '终端命令已复制')
+    window.setTimeout(() => {
+      if (copiedMCPConfig.value === kind) copiedMCPConfig.value = ''
+    }, 1800)
+  } catch (error) {
+    settingsError.value = error instanceof Error ? error.message : String(error)
   }
 }
 
@@ -3090,6 +3119,26 @@ watch(activeSection, (section) => {
               <button class="secondary-button" :disabled="commandLineToolInstalling || commandLineTool?.installed || commandLineTool?.conflict" @click="installCommandLineTool">{{ commandLineToolInstalling ? '安装中…' : commandLineTool?.installed ? '已安装' : commandLineTool?.conflict ? '路径被占用' : '安装命令' }}</button>
             </div>
           </div>
+        </section>
+
+        <section class="panel settings-panel mcp-settings-panel">
+          <div class="panel-header"><div><span class="section-kicker">AI / MODEL CONTEXT PROTOCOL</span><h2>MCP 访问配置</h2></div><span class="platform-badge">本机 stdio</span></div>
+          <div class="mcp-setup-intro">
+            <div class="settings-icon">AI</div>
+            <div><strong>让 Codex 或其他 AI 客户端调用 iDeploy</strong><span>MCP Server 已内置在 ideploy 命令中，无需启动额外服务。请先安装上方终端命令，再将下面任一种配置添加到 AI 客户端。</span></div>
+          </div>
+          <div class="mcp-setup-grid">
+            <article class="mcp-setup-card">
+              <div class="mcp-step-heading"><span>A</span><div><strong>Codex</strong><small>在终端执行注册命令</small></div></div>
+              <div class="mcp-code-block"><code>{{ mcpCodexCommand }}</code><button type="button" :aria-label="copiedMCPConfig === 'codex' ? '已复制 Codex 注册命令' : '复制 Codex 注册命令'" @click="copyMCPConfig('codex')">{{ copiedMCPConfig === 'codex' ? '已复制' : '复制' }}</button></div>
+              <div class="mcp-verify"><span>注册后运行</span><code>codex mcp list</code><button type="button" @click="copyMCPConfig('verify')">{{ copiedMCPConfig === 'verify' ? '已复制' : '复制' }}</button></div>
+            </article>
+            <article class="mcp-setup-card">
+              <div class="mcp-step-heading"><span>B</span><div><strong>其他 MCP 客户端</strong><small>添加 stdio Server 配置</small></div></div>
+              <div class="mcp-code-block json"><pre>{{ mcpClientConfig }}</pre><button type="button" :aria-label="copiedMCPConfig === 'json' ? '已复制通用 MCP 配置' : '复制通用 MCP 配置'" @click="copyMCPConfig('json')">{{ copiedMCPConfig === 'json' ? '已复制' : '复制 JSON' }}</button></div>
+            </article>
+          </div>
+          <div class="mcp-security-note"><strong>连接方式与权限</strong><span>客户端通过标准输入输出启动 <code>{{ mcpCommandPath }} mcp</code>，不会监听网络端口。MCP 与桌面端共享项目、部署记录和系统钥匙串凭据，但不会把 Registry、SSH 或 Keychain 密钥返回给 AI。发布、回滚、启停等操作会修改远程环境，请仅授权可信的本机客户端。</span></div>
         </section>
 
         <section class="panel settings-panel">
