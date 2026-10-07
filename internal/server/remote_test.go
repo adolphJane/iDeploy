@@ -111,13 +111,36 @@ func TestDeployContainerBuildsControlledDockerCommand(t *testing.T) {
 		arguments = append(arguments, args...)
 		return exec.CommandContext(ctx, "sh", "-c", "printf ok")
 	}}
-	_, err := remote.DeployContainer(context.Background(), Connection{Host: "example.com", Port: 22, SSHUser: "deploy"}, "api", "registry.example/team/api:v1", "unless-stopped", []string{"8080:80"})
+	_, err := remote.DeployContainer(context.Background(), Connection{Host: "example.com", Port: 22, SSHUser: "deploy"}, "api", "registry.example/team/api:v1", "unless-stopped", []string{"8080:80"}, map[string]string{
+		"com.ideploy.pinned-image": "registry.example/team/api@sha256:abc",
+		"com.ideploy.version":      "v1",
+	})
 	joined := strings.Join(arguments, " ")
-	if err != nil || !containsAll(joined, "docker rename 'api'", "--publish '8080:80'", "'registry.example/team/api:v1'", "IDEPLOY_PREVIOUS") {
+	if err != nil || !containsAll(joined, "docker rename 'api'", "--publish '8080:80'", "--label 'com.ideploy.pinned-image=registry.example/team/api@sha256:abc'", "--label 'com.ideploy.version=v1'", "'registry.example/team/api:v1'", "IDEPLOY_PREVIOUS") {
 		t.Fatalf("unexpected deployment command: err=%v args=%v", err, arguments)
 	}
-	if _, err := remote.DeployContainer(context.Background(), Connection{}, "api; touch /tmp/pwned", "image:v1", "always", nil); err == nil {
+	if _, err := remote.DeployContainer(context.Background(), Connection{}, "api; touch /tmp/pwned", "image:v1", "always", nil, nil); err == nil {
 		t.Fatal("accepted unsafe container name")
+	}
+	if _, err := remote.DeployContainer(context.Background(), Connection{}, "api", "image:v1", "always", nil, map[string]string{"unsafe key": "value"}); err == nil {
+		t.Fatal("accepted unsafe container label")
+	}
+}
+
+func TestTagImageBuildsVerifiedLocalAliasCommand(t *testing.T) {
+	var arguments []string
+	remote := &Remote{command: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		arguments = append(arguments, args...)
+		return exec.CommandContext(ctx, "sh", "-c", "printf ok")
+	}}
+	source := "registry.example/team/api@sha256:0123456789abcdef"
+	target := "registry.example/team/api:v1.2.3"
+	if err := remote.TagImage(context.Background(), Connection{Host: "example.com", Port: 22, SSHUser: "deploy"}, source, target); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(arguments, " ")
+	if !containsAll(joined, "docker image inspect", "docker image tag \"$source_id\"", "'registry.example/team/api:v1.2.3'", "local image tag verification failed") {
+		t.Fatalf("unexpected tag command: %s", joined)
 	}
 }
 

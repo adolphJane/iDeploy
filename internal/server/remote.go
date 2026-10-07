@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -172,6 +173,27 @@ func (r *Remote) PullImage(ctx context.Context, connection Connection, image str
 	return err
 }
 
+// TagImage creates a server-local, human-readable alias for an image that was
+// pulled by digest. It verifies that the alias resolves to the exact same local
+// image ID and never pushes or mutates the registry tag.
+func (r *Remote) TagImage(ctx context.Context, connection Connection, source, target string) error {
+	if err := validateImageReference(source); err != nil {
+		return err
+	}
+	if err := validateImageReference(target); err != nil {
+		return err
+	}
+	command := "source_id=$(docker image inspect --format '{{.Id}}' " + shellQuote(source) + ") || exit $?; " +
+		"docker image tag \"$source_id\" " + shellQuote(target) + " || exit $?; " +
+		"target_id=$(docker image inspect --format '{{.Id}}' " + shellQuote(target) + ") || exit $?; " +
+		"if [ \"$source_id\" != \"$target_id\" ]; then printf 'local image tag verification failed\\n' >&2; exit 1; fi"
+	_, err := r.runTimeout(ctx, connection, command, 45*time.Second)
+	if err != nil {
+		return fmt.Errorf("create verified local image tag: %w", err)
+	}
+	return nil
+}
+
 func (r *Remote) LoginRegistry(ctx context.Context, connection Connection, registryHost, username, password string) error {
 	if !registryHostPattern.MatchString(registryHost) || username == "" || password == "" || strings.ContainsAny(username, "\r\n") {
 		return errors.New("invalid registry credentials")
@@ -187,7 +209,7 @@ func (r *Remote) LoginRegistry(ctx context.Context, connection Connection, regis
 // DeployContainer stages a replacement while preserving the previous
 // container under a temporary backup name. Call CommitContainerReplacement
 // only after health checks pass, or RollbackContainerReplacement on failure.
-func (r *Remote) DeployContainer(ctx context.Context, connection Connection, name, image, restartPolicy string, ports []string) (ContainerReplacement, error) {
+func (r *Remote) DeployContainer(ctx context.Context, connection Connection, name, image, restartPolicy string, ports []string, labels map[string]string) (ContainerReplacement, error) {
 	if !validContainerID(name) {
 		return ContainerReplacement{}, errors.New("invalid container name")
 	}
@@ -206,6 +228,17 @@ func (r *Remote) DeployContainer(ctx context.Context, connection Connection, nam
 	}
 	backupName := backupBase + suffix
 	args := []string{"docker run -d", "--restart " + shellQuote(restartPolicy), "--name " + shellQuote(name)}
+	labelKeys := make([]string, 0, len(labels))
+	for key, value := range labels {
+		if !dockerLabelKeyPattern.MatchString(key) || len(key) > 128 || value == "" || len(value) > 1024 || strings.ContainsAny(value, "\r\n") {
+			return ContainerReplacement{}, fmt.Errorf("invalid container label %q", key)
+		}
+		labelKeys = append(labelKeys, key)
+	}
+	sort.Strings(labelKeys)
+	for _, key := range labelKeys {
+		args = append(args, "--label "+shellQuote(key+"="+labels[key]))
+	}
 	for _, port := range ports {
 		if !deploymentPortPattern.MatchString(port) {
 			return ContainerReplacement{}, fmt.Errorf("invalid port mapping %q", port)
@@ -432,6 +465,7 @@ func connectionFailureDetail(connection Connection, err error) string {
 var containerIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 var deploymentPortPattern = regexp.MustCompile(`^(?:(?:\d{1,3}\.){3}\d{1,3}:)?\d{1,5}:\d{1,5}(?:/(?:tcp|udp))?$`)
 var imageReferencePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,511}$`)
+var dockerLabelKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 var safeVersionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 var registryHostPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.:-]{0,254}$`)
 

@@ -206,6 +206,21 @@ func containerBuildArguments(dockerfile, imageRef, contextDir, platform string, 
 	return []string{"build", "--platform", platform, "--pull", "-f", dockerfile, "-t", imageRef, contextDir}
 }
 
+func runtimeTaggedImageReference(pinnedImage, version string) (string, error) {
+	if !pinnedImagePattern.MatchString(pinnedImage) {
+		return "", errors.New("发布制品未锁定镜像 Digest，无法创建运行版本标签")
+	}
+	repository, _, ok := strings.Cut(pinnedImage, "@")
+	if !ok || repository == "" || !releaseVersionPattern.MatchString(version) {
+		return "", errors.New("无法从发布制品生成运行版本标签")
+	}
+	tagged := repository + ":" + version
+	if !validLocalImageReference(tagged) {
+		return "", errors.New("生成的运行版本标签无效")
+	}
+	return tagged, nil
+}
+
 func explainDockerBuildError(buildErr error, dockerfilePath string) error {
 	detail := buildErr.Error()
 	lower := strings.ToLower(detail)
@@ -474,11 +489,19 @@ func (s *SystemService) deploymentReleaseHandler(ctx context.Context, task job.J
 		if err := remote.PullImage(ctx, host, imageRef); err != nil {
 			return err
 		}
+		runtimeImageRef, err := runtimeTaggedImageReference(imageRef, release.Version)
+		if err != nil {
+			return err
+		}
+		if err := remote.TagImage(ctx, host, imageRef, runtimeImageRef); err != nil {
+			return fmt.Errorf("创建远端运行版本标签: %w", err)
+		}
+		reporter.Log("远端运行镜像标签：" + runtimeImageRef + "（制品仍按 Digest 锁定）")
 		if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleaseDeploying, "正在替换远端容器", imageRef, source.revision, manifest); err != nil {
 			return err
 		}
 		reporter.Progress(74, "正在创建或更新远端容器")
-		return s.deployAndCheckContainer(ctx, deployments, release, target, host, reporter, remote, imageRef, source.revision, manifest)
+		return s.deployAndCheckContainer(ctx, deployments, release, target, host, reporter, remote, imageRef, runtimeImageRef, source.revision, manifest)
 	}
 	return s.finishReleaseHealthCheck(ctx, deployments, release, target, host, reporter, imageRef, source.revision, manifest, nil)
 }
@@ -621,6 +644,14 @@ func (s *SystemService) deploymentArtifactHandler(ctx context.Context, task job.
 		if err := remote.PullImage(ctx, host, source.ImageRef); err != nil {
 			return err
 		}
+		runtimeImageRef, err := runtimeTaggedImageReference(source.ImageRef, source.Version)
+		if err != nil {
+			return err
+		}
+		if err := remote.TagImage(ctx, host, source.ImageRef, runtimeImageRef); err != nil {
+			return fmt.Errorf("创建远端运行版本标签: %w", err)
+		}
+		reporter.Log("远端运行镜像标签：" + runtimeImageRef + "（制品仍按 Digest 锁定）")
 		deployDetail := "正在使用已有制品替换远端容器"
 		if rollback {
 			deployDetail = "正在恢复历史容器"
@@ -628,13 +659,17 @@ func (s *SystemService) deploymentArtifactHandler(ctx context.Context, task job.
 		if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleaseDeploying, deployDetail, source.ImageRef, source.SourceRevision, source.Manifest); err != nil {
 			return err
 		}
-		return s.deployAndCheckContainer(ctx, deployments, release, target, host, reporter, remote, source.ImageRef, source.SourceRevision, source.Manifest)
+		return s.deployAndCheckContainer(ctx, deployments, release, target, host, reporter, remote, source.ImageRef, runtimeImageRef, source.SourceRevision, source.Manifest)
 	}
 	return s.finishReleaseHealthCheck(ctx, deployments, release, target, host, reporter, source.ImageRef, source.SourceRevision, source.Manifest, nil)
 }
 
-func (s *SystemService) deployAndCheckContainer(ctx context.Context, deployments *deployment.Store, release deployment.Release, target deployment.Target, host server.Connection, reporter job.Reporter, remote *server.Remote, imageRef, revision, manifest string) error {
-	replacement, err := remote.DeployContainer(ctx, host, target.WorkloadName, imageRef, target.RestartPolicy, target.ContainerPorts)
+func (s *SystemService) deployAndCheckContainer(ctx context.Context, deployments *deployment.Store, release deployment.Release, target deployment.Target, host server.Connection, reporter job.Reporter, remote *server.Remote, imageRef, runtimeImageRef, revision, manifest string) error {
+	replacement, err := remote.DeployContainer(ctx, host, target.WorkloadName, runtimeImageRef, target.RestartPolicy, target.ContainerPorts, map[string]string{
+		"com.ideploy.pinned-image": imageRef,
+		"com.ideploy.release-id":   release.ID,
+		"com.ideploy.version":      release.Version,
+	})
 	if err != nil {
 		return err
 	}

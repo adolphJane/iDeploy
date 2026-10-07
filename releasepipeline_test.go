@@ -26,6 +26,22 @@ func TestBuildArgumentsKeepDockerBuildWhenProxyDisabled(t *testing.T) {
 	}
 }
 
+func TestRuntimeTaggedImageReferenceKeepsRepositoryAndVersion(t *testing.T) {
+	pinned := "harbor.example.com/library/api@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	got, err := runtimeTaggedImageReference(pinned, "v1.2.3")
+	if err != nil || got != "harbor.example.com/library/api:v1.2.3" {
+		t.Fatalf("unexpected runtime tag: %q err=%v", got, err)
+	}
+	for _, invalid := range []struct{ image, version string }{
+		{"harbor.example.com/library/api:v1.2.3", "v1.2.3"},
+		{pinned, "bad version"},
+	} {
+		if _, err := runtimeTaggedImageReference(invalid.image, invalid.version); err == nil {
+			t.Fatalf("accepted invalid runtime tag input: %#v", invalid)
+		}
+	}
+}
+
 func TestSecureProjectFileRejectsEscape(t *testing.T) {
 	root := t.TempDir()
 	if _, err := secureProjectFile(root, "../secret"); err == nil {

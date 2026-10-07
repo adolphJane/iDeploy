@@ -97,6 +97,8 @@ MCP 客户端可以按以下顺序完成新项目的接入和发布：
 
 失败或取消的发布可用 `retry_release` 按原版本重试：构建或推送前失败时会重新构建；已经记录不可变镜像 Digest 或 Compose 快照时，会直接复用该制品继续拉取与远程部署，不重新构建，也不覆盖同一 Tag。成功版本仍不可覆盖。
 
+普通容器发布在服务器上始终先按不可变 Digest 拉取和校验制品，然后创建仅存在于服务器本地的 `repository:version` 标签，并使用该标签启动容器。这样发布记录和回滚仍由 Digest 保证确定性，而 `docker ps` 的 IMAGE 列会显示可读的仓库与版本。容器同时记录 `com.ideploy.pinned-image`、`com.ideploy.version` 和 `com.ideploy.release-id` 标签；本地版本标签不会被推送回 Registry。Compose 仍使用锁定 Digest 的 Compose 快照。
+
 单容器发布需要项目具有 `dockerfile_path` 和不含 Tag/Digest 的 `image_repository`；本地项目未显式填写 Dockerfile 时会尝试自动检测。Compose 发布需要 `compose_path`，且 Compose 的 `image` 配置应使用 `${IMAGE_TAG}`。构建上下文、Dockerfile 和 Compose 文件路径均相对于项目根目录。
 
 创建本地项目示例：
