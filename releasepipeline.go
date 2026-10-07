@@ -77,7 +77,7 @@ func localSourceRevision(ctx context.Context, root string) string {
 	return "local-" + time.Now().UTC().Format("20060102T150405Z")
 }
 
-func buildAndPushRelease(ctx context.Context, source preparedSource, value project.Project, target deployment.Target, registryValue registry.Connection, registryPassword, version, platform string, reporter job.Reporter, stage func(deployment.ReleaseStatus, string) error) (imageRef, manifest string, err error) {
+func buildAndPushRelease(ctx context.Context, source preparedSource, value project.Project, target deployment.Target, registryValue registry.Connection, registryPassword, version, platform string, buildProxy buildProxyRuntime, reporter job.Reporter, stage func(deployment.ReleaseStatus, string) error) (imageRef, manifest string, err error) {
 	docker, err := toolchain.ResolveExecutable(ctx, "docker")
 	if err != nil {
 		return "", "", err
@@ -116,7 +116,8 @@ func buildAndPushRelease(ctx context.Context, source preparedSource, value proje
 			return "", "", err
 		}
 		reporter.Progress(28, "正在构建 Compose 服务镜像 · "+platform)
-		if _, err := runLocalCommand(ctx, source.root, environment, docker.Path, "compose", "-f", composeFile, "build", "--pull"); err != nil {
+		buildArguments := composeBuildArguments(composeFile, buildProxy)
+		if _, err := runLocalCommand(ctx, source.root, environment, docker.Path, buildArguments...); err != nil {
 			return "", "", err
 		}
 		for _, image := range images {
@@ -171,7 +172,8 @@ func buildAndPushRelease(ctx context.Context, source preparedSource, value proje
 		return "", "", err
 	}
 	reporter.Progress(28, "正在构建镜像 "+imageRef+" · "+platform)
-	if _, err := runLocalCommand(ctx, source.root, nil, docker.Path, "build", "--platform", platform, "--pull", "-f", dockerfile, "-t", imageRef, contextDir); err != nil {
+	buildArguments := containerBuildArguments(dockerfile, imageRef, contextDir, platform, buildProxy)
+	if _, err := runLocalCommand(ctx, source.root, nil, docker.Path, buildArguments...); err != nil {
 		return "", "", explainDockerBuildError(err, dockerfile)
 	}
 	if err := verifyLocalImagePlatform(ctx, docker.Path, imageRef, platform); err != nil {
@@ -187,6 +189,21 @@ func buildAndPushRelease(ctx context.Context, source preparedSource, value proje
 	}
 	pinned, err := pinnedPushReference(value.ImageRepository, pushOutput)
 	return pinned, "", err
+}
+
+func composeBuildArguments(composeFile string, buildProxy buildProxyRuntime) []string {
+	arguments := []string{"compose", "-f", composeFile, "build", "--pull"}
+	if buildProxy.BuilderName != "" {
+		arguments = append(arguments, "--builder", buildProxy.BuilderName)
+	}
+	return arguments
+}
+
+func containerBuildArguments(dockerfile, imageRef, contextDir, platform string, buildProxy buildProxyRuntime) []string {
+	if buildProxy.BuilderName != "" {
+		return []string{"buildx", "build", "--builder", buildProxy.BuilderName, "--load", "--platform", platform, "--pull", "-f", dockerfile, "-t", imageRef, contextDir}
+	}
+	return []string{"build", "--platform", platform, "--pull", "-f", dockerfile, "-t", imageRef, contextDir}
 }
 
 func explainDockerBuildError(buildErr error, dockerfilePath string) error {
@@ -391,6 +408,14 @@ func (s *SystemService) deploymentReleaseHandler(ctx context.Context, task job.J
 	if err != nil {
 		return err
 	}
+	docker, err := toolchain.ResolveExecutable(ctx, "docker")
+	if err != nil {
+		return err
+	}
+	buildProxy, err := s.prepareBuildProxy(ctx, docker.Path, registryValue, reporter)
+	if err != nil {
+		return err
+	}
 
 	if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleasePreparing, "正在准备源码", "", "", ""); err != nil {
 		return err
@@ -416,7 +441,7 @@ func (s *SystemService) deploymentReleaseHandler(ctx context.Context, task job.J
 	if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleaseBuilding, "正在构建镜像", "", source.revision, ""); err != nil {
 		return err
 	}
-	imageRef, manifest, err := buildAndPushRelease(ctx, source, projectValue, target, registryValue, registryPassword, release.Version, platform, reporter, func(status deployment.ReleaseStatus, detail string) error {
+	imageRef, manifest, err := buildAndPushRelease(ctx, source, projectValue, target, registryValue, registryPassword, release.Version, platform, buildProxy, reporter, func(status deployment.ReleaseStatus, detail string) error {
 		return deployments.UpdateRelease(ctx, release.ID, status, detail, "", source.revision, "")
 	})
 	if err != nil {
@@ -453,20 +478,26 @@ func (s *SystemService) deploymentReleaseHandler(ctx context.Context, task job.J
 			return err
 		}
 		reporter.Progress(74, "正在创建或更新远端容器")
-		if err := remote.DeployContainer(ctx, host, target.WorkloadName, imageRef, target.RestartPolicy, target.ContainerPorts); err != nil {
-			return err
-		}
+		return s.deployAndCheckContainer(ctx, deployments, release, target, host, reporter, remote, imageRef, source.revision, manifest)
 	}
-	return s.finishReleaseHealthCheck(ctx, deployments, release, target, host, reporter, imageRef, source.revision, manifest)
+	return s.finishReleaseHealthCheck(ctx, deployments, release, target, host, reporter, imageRef, source.revision, manifest, nil)
 }
 
-func (s *SystemService) deploymentRollbackHandler(ctx context.Context, task job.Job, reporter job.Reporter) (handlerErr error) {
+func (s *SystemService) deploymentRollbackHandler(ctx context.Context, task job.Job, reporter job.Reporter) error {
+	return s.deploymentArtifactHandler(ctx, task, reporter, true)
+}
+
+func (s *SystemService) deploymentResumeHandler(ctx context.Context, task job.Job, reporter job.Reporter) error {
+	return s.deploymentArtifactHandler(ctx, task, reporter, false)
+}
+
+func (s *SystemService) deploymentArtifactHandler(ctx context.Context, task job.Job, reporter job.Reporter, rollback bool) (handlerErr error) {
 	var payload struct {
 		ReleaseID string `json:"releaseId"`
 		SourceID  string `json:"sourceId"`
 	}
 	if err := json.Unmarshal([]byte(task.Payload), &payload); err != nil || payload.ReleaseID == "" || payload.SourceID == "" {
-		return errors.New("invalid deployment rollback payload")
+		return errors.New("invalid deployment artifact payload")
 	}
 	deployments, err := s.deploymentStore()
 	if err != nil {
@@ -491,8 +522,14 @@ func (s *SystemService) deploymentRollbackHandler(ctx context.Context, task job.
 	if err != nil {
 		return err
 	}
-	if source.DeploymentID != release.DeploymentID || source.Status != deployment.ReleaseSucceeded {
+	if source.DeploymentID != release.DeploymentID {
+		return errors.New("制品来源不属于当前部署目标")
+	}
+	if rollback && source.Status != deployment.ReleaseSucceeded {
 		return errors.New("只能回滚到当前部署目标的成功版本")
+	}
+	if !rollback && (source.Action != "deploy" || (source.Status != deployment.ReleaseFailed && source.Status != deployment.ReleaseCanceled)) {
+		return errors.New("只能恢复当前部署目标失败或取消的普通发布")
 	}
 	if err := validateRollbackArtifact(source.ImageRef, source.Manifest); err != nil {
 		return err
@@ -510,7 +547,7 @@ func (s *SystemService) deploymentRollbackHandler(ctx context.Context, task job.
 		return err
 	}
 	if host.Status != server.StatusHealthy {
-		return errors.New("目标服务器当前不可用，无法回滚")
+		return errors.New("目标服务器当前不可用，无法部署已有制品")
 	}
 	projects, err := s.projectStore()
 	if err != nil {
@@ -550,13 +587,19 @@ func (s *SystemService) deploymentRollbackHandler(ctx context.Context, task job.
 			return fmt.Errorf("登录服务器 Docker 镜像仓库: %w", err)
 		}
 	}
-	if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleasePulling, "正在拉取历史版本", source.ImageRef, source.SourceRevision, source.Manifest); err != nil {
+	detail := "正在拉取失败发布的已有制品"
+	progress := "正在拉取已推送发布制品"
+	if rollback {
+		detail = "正在拉取历史版本"
+		progress = "正在拉取历史发布制品"
+	}
+	if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleasePulling, detail, source.ImageRef, source.SourceRevision, source.Manifest); err != nil {
 		return err
 	}
-	reporter.Progress(30, "正在拉取历史发布制品")
+	reporter.Progress(30, progress)
 	if target.WorkloadKind == "compose" {
 		if source.Manifest == "" {
-			return errors.New("历史版本缺少 Compose 快照，无法回滚")
+			return errors.New("已有制品缺少 Compose 快照，无法部署")
 		}
 		if err := remote.UploadCompose(ctx, host, target.ID, source.Manifest); err != nil {
 			return err
@@ -564,7 +607,11 @@ func (s *SystemService) deploymentRollbackHandler(ctx context.Context, task job.
 		if err := remote.PullCompose(ctx, host, target.ID, target.WorkloadName, source.Version); err != nil {
 			return err
 		}
-		if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleaseDeploying, "正在恢复历史 Compose 项目", source.ImageRef, source.SourceRevision, source.Manifest); err != nil {
+		deployDetail := "正在使用已有制品更新 Compose 项目"
+		if rollback {
+			deployDetail = "正在恢复历史 Compose 项目"
+		}
+		if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleaseDeploying, deployDetail, source.ImageRef, source.SourceRevision, source.Manifest); err != nil {
 			return err
 		}
 		if err := remote.UpCompose(ctx, host, target.ID, target.WorkloadName, source.Version); err != nil {
@@ -574,14 +621,43 @@ func (s *SystemService) deploymentRollbackHandler(ctx context.Context, task job.
 		if err := remote.PullImage(ctx, host, source.ImageRef); err != nil {
 			return err
 		}
-		if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleaseDeploying, "正在恢复历史容器", source.ImageRef, source.SourceRevision, source.Manifest); err != nil {
+		deployDetail := "正在使用已有制品替换远端容器"
+		if rollback {
+			deployDetail = "正在恢复历史容器"
+		}
+		if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleaseDeploying, deployDetail, source.ImageRef, source.SourceRevision, source.Manifest); err != nil {
 			return err
 		}
-		if err := remote.DeployContainer(ctx, host, target.WorkloadName, source.ImageRef, target.RestartPolicy, target.ContainerPorts); err != nil {
-			return err
-		}
+		return s.deployAndCheckContainer(ctx, deployments, release, target, host, reporter, remote, source.ImageRef, source.SourceRevision, source.Manifest)
 	}
-	return s.finishReleaseHealthCheck(ctx, deployments, release, target, host, reporter, source.ImageRef, source.SourceRevision, source.Manifest)
+	return s.finishReleaseHealthCheck(ctx, deployments, release, target, host, reporter, source.ImageRef, source.SourceRevision, source.Manifest, nil)
+}
+
+func (s *SystemService) deployAndCheckContainer(ctx context.Context, deployments *deployment.Store, release deployment.Release, target deployment.Target, host server.Connection, reporter job.Reporter, remote *server.Remote, imageRef, revision, manifest string) error {
+	replacement, err := remote.DeployContainer(ctx, host, target.WorkloadName, imageRef, target.RestartPolicy, target.ContainerPorts)
+	if err != nil {
+		return err
+	}
+	committed := false
+	err = s.finishReleaseHealthCheck(ctx, deployments, release, target, host, reporter, imageRef, revision, manifest, func() error {
+		commitErr := remote.CommitContainerReplacement(ctx, host, replacement)
+		if commitErr == nil {
+			committed = true
+		}
+		return commitErr
+	})
+	if err == nil {
+		return nil
+	}
+	if committed {
+		return fmt.Errorf("%w；新容器已通过健康检查并完成替换，但发布记录收尾失败", err)
+	}
+	restoreContext, cancel := context.WithTimeout(context.Background(), 75*time.Second)
+	defer cancel()
+	if restoreErr := remote.RollbackContainerReplacement(restoreContext, host, replacement); restoreErr != nil {
+		return errors.Join(err, fmt.Errorf("恢复上一容器失败: %w", restoreErr))
+	}
+	return fmt.Errorf("%w；已恢复上一容器", err)
 }
 
 func sameStrings(left, right []string) bool {
@@ -596,7 +672,7 @@ func sameStrings(left, right []string) bool {
 	return true
 }
 
-func (s *SystemService) finishReleaseHealthCheck(ctx context.Context, deployments *deployment.Store, release deployment.Release, target deployment.Target, host server.Connection, reporter job.Reporter, imageRef, revision, manifest string) error {
+func (s *SystemService) finishReleaseHealthCheck(ctx context.Context, deployments *deployment.Store, release deployment.Release, target deployment.Target, host server.Connection, reporter job.Reporter, imageRef, revision, manifest string, onHealthy func() error) error {
 	if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleaseChecking, "正在执行健康检查", imageRef, revision, manifest); err != nil {
 		return err
 	}
@@ -625,6 +701,11 @@ func (s *SystemService) finishReleaseHealthCheck(ctx context.Context, deployment
 				}
 			}
 			if healthy {
+				if onHealthy != nil {
+					if err := onHealthy(); err != nil {
+						return fmt.Errorf("清理上一容器失败: %w", err)
+					}
+				}
 				if err := deployments.SaveSnapshot(ctx, host.ID, containers); err != nil {
 					return err
 				}

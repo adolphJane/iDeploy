@@ -12,6 +12,8 @@ iDeploy 是面向 macOS 的单用户 Docker 交付与远程运维桌面应用。
 - Harbor / OCI 用户名保存在 SQLite，密码或 Token 保存在 macOS Keychain；
 - “数据库”页可使用独立的只读 PostgreSQL、MySQL / MariaDB 账号查看远程 Schema、表、字段、索引和受限分页数据；连接密码仅保存在 macOS Keychain；
 - 镜像仓库登录通过标准输入完成，不把密码写入任务参数或命令行；
+- 可配置 iDeploy 专用 BuildKit Builder，将 Docker Hub、GHCR 等基础镜像统一映射到 Harbor Proxy Cache；MCP 发布自动继承全局代理策略；
+- MCP 支持幂等配置更新、项目验证、部署配置克隆、发布前检查，以及失败版本按原版本重建或复用已推送 Digest 继续部署；
 - 发布与回滚由服务器级互斥任务执行，完成后核对 Docker 运行状态和容器健康检查。
 
 ## Dockerfile 智能生成

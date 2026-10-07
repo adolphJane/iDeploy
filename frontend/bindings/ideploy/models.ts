@@ -5,6 +5,24 @@ export interface AISettingsView {
     "deepSeekConfigured": boolean;
 }
 
+export interface BuildProxyRule {
+    "upstream": string;
+    "mirror": string;
+}
+
+export interface BuildProxySettingsInput {
+    "mode": string;
+    "rules": BuildProxyRule[] | null;
+}
+
+export interface BuildProxySettingsView {
+    "mode": string;
+    "rules": BuildProxyRule[] | null;
+    "configured": boolean;
+    "builderName": string;
+    "detail": string;
+}
+
 export interface CleanupView {
     "servers": number;
     "deployments": number;
@@ -22,6 +40,36 @@ export interface CommandLineToolStatus {
     "commandPath": string;
     "executablePath": string;
     "detail": string;
+}
+
+export interface ContainerLogsInput {
+    "serverId": string;
+    "containerId": string;
+    "tail": number;
+}
+
+export interface ContainerLogsView {
+    "serverId": string;
+    "containerId": string;
+    "tail": number;
+    "logs": string;
+    "observedAt": string;
+}
+
+export interface ControlOperationResultView {
+    "ok": boolean;
+    "data"?: any;
+    "error"?: string;
+    "code"?: string;
+}
+
+export interface ControlOperationView {
+    "id": string;
+    "command": string;
+    "status": string;
+    "result"?: ControlOperationResultView | null;
+    "createdAt": string;
+    "updatedAt": string;
 }
 
 export interface DatabaseColumnView {
@@ -108,6 +156,34 @@ export interface DeploymentInput {
     "restartPolicy": string;
 }
 
+export interface DeploymentPatchInput {
+    "projectId"?: string | null;
+    "serverId"?: string | null;
+    "workloadKind"?: string | null;
+    "workloadName"?: string | null;
+    "containerPorts"?: string[] | null;
+    "restartPolicy"?: string | null;
+}
+
+export interface DeploymentPreflightCheckView {
+    "id": string;
+    "status": string;
+    "detail": string;
+}
+
+export interface DeploymentPreflightInput {
+    "deploymentId": string;
+    "registryId": string;
+}
+
+export interface DeploymentPreflightView {
+    "ok": boolean;
+    "deploymentId": string;
+    "checks": DeploymentPreflightCheckView[] | null;
+    "baseImages": string[] | null;
+    "suggestedPorts": number[] | null;
+}
+
 export interface DeploymentReleaseInput {
     "deploymentId": string;
     "registryId": string;
@@ -129,6 +205,15 @@ export interface DeploymentReleaseView {
     "detail": string;
     "createdAt": string;
     "finishedAt": string;
+}
+
+export interface DeploymentRuntimeView {
+    "deploymentId": string;
+    "serverId": string;
+    "status": string;
+    "detail": string;
+    "observedAt": string;
+    "containers": RemoteContainerView[] | null;
 }
 
 export interface DeploymentVersionSuggestionView {
@@ -221,6 +306,24 @@ export interface Overview {
     "jobs": JobView[] | null;
 }
 
+export interface PortAvailabilityInput {
+    "serverId": string;
+    "ports": number[] | null;
+}
+
+export interface PortAvailabilityItemView {
+    "port": number;
+    "available": boolean;
+    "occupiedBy": string;
+}
+
+export interface PortAvailabilityView {
+    "serverId": string;
+    "allAvailable": boolean;
+    "ports": PortAvailabilityItemView[] | null;
+    "suggestedPorts": number[] | null;
+}
+
 export interface ProjectInput {
     "name": string;
     "description": string;
@@ -233,6 +336,20 @@ export interface ProjectInput {
     "dockerfilePath": string;
     "composePath": string;
     "imageRepository": string;
+}
+
+export interface ProjectPatchInput {
+    "name"?: string | null;
+    "description"?: string | null;
+    "sourceKind"?: string | null;
+    "localPath"?: string | null;
+    "repositoryUrl"?: string | null;
+    "refKind"?: string | null;
+    "refValue"?: string | null;
+    "contextPath"?: string | null;
+    "dockerfilePath"?: string | null;
+    "composePath"?: string | null;
+    "imageRepository"?: string | null;
 }
 
 export interface ProjectView {

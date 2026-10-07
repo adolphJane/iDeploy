@@ -57,5 +57,5 @@ func executeRuntimeRequest(ctx context.Context, request cliRequest) cliResponse 
 		return errorCLIResponse("runtime_unavailable", err.Error())
 	}
 	defer service.close()
-	return executeCLIRequest(ctx, service, request)
+	return executeIdempotentCLIRequest(ctx, service, request)
 }

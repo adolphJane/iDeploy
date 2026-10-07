@@ -111,13 +111,28 @@ func TestDeployContainerBuildsControlledDockerCommand(t *testing.T) {
 		arguments = append(arguments, args...)
 		return exec.CommandContext(ctx, "sh", "-c", "printf ok")
 	}}
-	err := remote.DeployContainer(context.Background(), Connection{Host: "example.com", Port: 22, SSHUser: "deploy"}, "api", "registry.example/team/api:v1", "unless-stopped", []string{"8080:80"})
+	_, err := remote.DeployContainer(context.Background(), Connection{Host: "example.com", Port: 22, SSHUser: "deploy"}, "api", "registry.example/team/api:v1", "unless-stopped", []string{"8080:80"})
 	joined := strings.Join(arguments, " ")
-	if err != nil || !containsAll(joined, "docker rm -f 'api'", "--publish '8080:80'", "'registry.example/team/api:v1'") {
+	if err != nil || !containsAll(joined, "docker rename 'api'", "--publish '8080:80'", "'registry.example/team/api:v1'", "IDEPLOY_PREVIOUS") {
 		t.Fatalf("unexpected deployment command: err=%v args=%v", err, arguments)
 	}
-	if err := remote.DeployContainer(context.Background(), Connection{}, "api; touch /tmp/pwned", "image:v1", "always", nil); err == nil {
+	if _, err := remote.DeployContainer(context.Background(), Connection{}, "api; touch /tmp/pwned", "image:v1", "always", nil); err == nil {
 		t.Fatal("accepted unsafe container name")
+	}
+}
+
+func TestContainerLogsBuildsBoundedCommand(t *testing.T) {
+	var arguments []string
+	remote := &Remote{command: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		arguments = append(arguments, args...)
+		return exec.CommandContext(ctx, "sh", "-c", "printf 'line one'")
+	}}
+	logs, err := remote.ContainerLogs(context.Background(), Connection{Host: "example.com", Port: 22, SSHUser: "deploy"}, "api", 250)
+	if err != nil || logs != "line one" || !containsAll(strings.Join(arguments, " "), "docker logs --timestamps --tail 250 'api'") {
+		t.Fatalf("unexpected container logs result: logs=%q err=%v args=%v", logs, err, arguments)
+	}
+	if _, err := remote.ContainerLogs(context.Background(), Connection{}, "unsafe;name", 20); err == nil {
+		t.Fatal("accepted unsafe container identifier")
 	}
 }
 

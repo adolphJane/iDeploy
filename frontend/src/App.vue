@@ -235,6 +235,22 @@ type ProjectView = {
 
 type ProjectInput = Omit<ProjectView, 'id' | 'resolvedCommit' | 'status' | 'lastCheckedAt' | 'lastError' | 'createdAt' | 'updatedAt'>
 
+type ProjectGitStatusView = {
+  available: boolean
+  detail: string
+  root: string
+  branch: string
+  head: string
+  upstream: string
+  changedFiles: number
+  stagedFiles: number
+  untracked: number
+  ahead: number
+  behind: number
+  remoteFresh: boolean
+  checkedAt: string
+}
+
 type DeploymentVersionSuggestionView = {
   currentVersion: string
   usedVersions: string[]
@@ -244,6 +260,9 @@ type DeploymentVersionSuggestionView = {
 }
 
 type AISettingsView = { deepSeekConfigured: boolean }
+type BuildProxyMode = 'disabled' | 'preferred' | 'required'
+type BuildProxyRule = { upstream: string; mirror: string }
+type BuildProxySettingsView = { mode: BuildProxyMode; rules: BuildProxyRule[]; configured: boolean; builderName: string; detail: string }
 type CommandLineToolStatus = { installed: boolean; conflict: boolean; commandPath: string; executablePath: string; detail: string }
 type DockerfileGenerationView = {
   content: string
@@ -276,7 +295,7 @@ type DeploymentView = {
 }
 
 type DeploymentInput = { projectId: string; serverId: string; workloadKind: string; workloadName: string; containerPorts: string[]; restartPolicy: string }
-type DeploymentPreflightAction = 'project' | 'dockerfile' | 'image' | 'workload' | 'server' | 'registry' | 'docker'
+type DeploymentPreflightAction = 'project' | 'dockerfile' | 'image' | 'workload' | 'server' | 'registry' | 'docker' | 'settings'
 type DeploymentPreflightCheck = {
   id: string
   label: string
@@ -469,6 +488,8 @@ const workspaceProjects = ref<ProjectView[]>([])
 const workspaceProjectLoading = ref(false)
 const workspaceProjectSaving = ref(false)
 const workspaceProjectInspectingID = ref('')
+const projectGitStatuses = reactive<Record<string, ProjectGitStatusView>>({})
+const projectGitCheckingID = ref('')
 const workspaceProjectError = ref('')
 const workspaceProjectDialogOpen = ref(false)
 const dockerfileDialogOpen = ref(false)
@@ -558,6 +579,10 @@ const aiSettings = ref<AISettingsView>({ deepSeekConfigured: false })
 const deepSeekAPIKey = ref('')
 const deepSeekKeyVisible = ref(false)
 const aiSettingsSaving = ref(false)
+const buildProxySettings = ref<BuildProxySettingsView>({ mode: 'disabled', rules: [], configured: false, builderName: '', detail: '构建代理未启用' })
+const buildProxyMode = ref<BuildProxyMode>('disabled')
+const buildProxyRulesText = ref('')
+const buildProxySaving = ref(false)
 const commandLineTool = ref<CommandLineToolStatus | null>(null)
 const commandLineToolInstalling = ref(false)
 const copiedMCPConfig = ref<'codex' | 'json' | 'verify' | ''>('')
@@ -717,6 +742,43 @@ async function loadAISettings() {
     aiSettings.value = await SystemService.GetAISettings() as unknown as AISettingsView
   } catch (error) {
     settingsError.value = error instanceof Error ? error.message : String(error)
+  }
+}
+
+async function loadBuildProxySettings() {
+  try {
+    const settings = await SystemService.GetBuildProxySettings() as unknown as BuildProxySettingsView
+    buildProxySettings.value = settings
+    buildProxyMode.value = settings.mode
+    buildProxyRulesText.value = settings.rules.map(rule => `${rule.upstream}=${rule.mirror}`).join('\n')
+  } catch (error) {
+    settingsError.value = error instanceof Error ? error.message : String(error)
+  }
+}
+
+function parseBuildProxyRules(value: string): BuildProxyRule[] {
+  return value.split('\n').map(line => line.trim()).filter(line => line && !line.startsWith('#')).map((line, index) => {
+    const separator = line.indexOf('=')
+    if (separator <= 0 || separator === line.length - 1) throw new Error(`第 ${index + 1} 条代理规则格式无效，请使用 upstream=host/project`)
+    return { upstream: line.slice(0, separator).trim(), mirror: line.slice(separator + 1).trim() }
+  })
+}
+
+async function saveBuildProxySettings() {
+  if (buildProxySaving.value) return
+  buildProxySaving.value = true
+  settingsError.value = ''
+  try {
+    const rules = parseBuildProxyRules(buildProxyRulesText.value)
+    const settings = await SystemService.SaveBuildProxySettings({ mode: buildProxyMode.value, rules }) as unknown as BuildProxySettingsView
+    buildProxySettings.value = settings
+    buildProxyMode.value = settings.mode
+    buildProxyRulesText.value = settings.rules.map(rule => `${rule.upstream}=${rule.mirror}`).join('\n')
+    showToast(settings.configured ? '构建代理配置已保存，后续发布将自动使用专用 Builder' : '构建代理已停用')
+  } catch (error) {
+    settingsError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    buildProxySaving.value = false
   }
 }
 
@@ -952,6 +1014,19 @@ async function inspectWorkspaceProject(project: ProjectView) {
 function openWorkspaceProject(project: ProjectView) {
   selectedWorkspaceProjectID.value = project.id
   workspaceProjectPage.value = 'detail'
+  void checkProjectGitStatus(project)
+}
+
+async function checkProjectGitStatus(project: ProjectView, refreshRemote = false) {
+  if (projectGitCheckingID.value) return
+  projectGitCheckingID.value = project.id
+  try {
+    projectGitStatuses[project.id] = await SystemService.ProjectGitStatus(project.id, refreshRemote) as unknown as ProjectGitStatusView
+  } catch (error) {
+    workspaceProjectError.value = friendlyError(error)
+  } finally {
+    projectGitCheckingID.value = ''
+  }
 }
 
 function goBackWorkspaceProjectList() {
@@ -1043,6 +1118,10 @@ function deploymentPreflightChecks(deployment: DeploymentView, registryID = ''):
   checks.push(docker?.available
     ? { id: 'docker', label: '本机 Docker', detail: docker.version || 'Docker daemon 可用', state: 'ready' }
     : { id: 'docker', label: '本机 Docker', detail: docker?.detail || '尚未完成 Docker 环境检测', state: docker ? 'blocked' : 'warning', action: 'docker', actionLabel: '查看本机检测' })
+
+  checks.push(buildProxySettings.value.configured
+    ? { id: 'build-proxy', label: '构建镜像代理', detail: buildProxySettings.value.detail, state: buildProxySettings.value.mode === 'preferred' ? 'warning' : 'ready', action: 'settings', actionLabel: '查看代理' }
+    : { id: 'build-proxy', label: '构建镜像代理', detail: '未启用，基础镜像将按 Docker 当前配置拉取', state: 'warning', action: 'settings', actionLabel: '配置代理' })
 
   const serverReady = server?.status === 'healthy' && (!runtimeProbe || runtimeProbe.status === 'healthy')
   checks.push(serverReady
@@ -1170,6 +1249,9 @@ function handleReleasePreflightAction(check: DeploymentPreflightCheck) {
       break
     case 'docker':
       activeSection.value = 'overview'
+      break
+    case 'settings':
+      activeSection.value = 'settings'
       break
   }
 }
@@ -2433,6 +2515,7 @@ let clockTimer: number | undefined
 onMounted(() => {
   void refresh()
   void loadAISettings()
+  void loadBuildProxySettings()
   eventCleanups.push(Events.On('job:updated', (event: { data: JobView }) => applyJobUpdate(event.data)))
   eventCleanups.push(Events.On('registry:updated', (event) => upsertRegistry(event.data as RegistryView)))
   eventCleanups.push(Events.On('server:updated', (event) => upsertServer(event.data as ServerView)))
@@ -2469,12 +2552,14 @@ function modalKeyboard(event: KeyboardEvent) {
 }
 
 watch(activeSection, (section) => {
-  if (section === 'projects') void loadWorkspaceProjects()
+  if (section === 'projects') void loadWorkspaceProjects().then(() => {
+    if (workspaceProjectPage.value === 'detail' && selectedWorkspaceProject.value) void checkProjectGitStatus(selectedWorkspaceProject.value)
+  })
   if (section === 'registries') void loadRegistries()
   if (section === 'databases') void loadDatabaseConnections()
   if (section === 'servers') void loadServers()
   if (section === 'deployments') void refreshDeploymentsWithFeedback()
-  if (section === 'settings') void Promise.all([refresh(), loadServers(), loadDeployments(), loadAISettings(), loadCommandLineToolStatus()])
+  if (section === 'settings') void Promise.all([refresh(), loadServers(), loadDeployments(), loadAISettings(), loadBuildProxySettings(), loadCommandLineToolStatus()])
 })
 </script>
 
@@ -2846,7 +2931,7 @@ watch(activeSection, (section) => {
                 <button class="workspace-project-main" @click="openWorkspaceProject(project)">
                   <div class="workspace-project-avatar" :class="project.sourceKind">{{ project.sourceKind === 'local' ? '⌂' : 'G' }}</div>
                   <div class="workspace-project-copy">
-                    <div><strong>{{ project.name }}</strong><span class="registry-kind-label">{{ projectSourceLabel(project) }}</span><span class="workspace-project-status" :class="project.status">{{ workspaceProjectStatusLabel[project.status] }}</span></div>
+                    <div><strong>{{ project.name }}</strong><span class="registry-kind-label">{{ projectSourceLabel(project) }}</span><span class="workspace-project-status" :class="project.status">{{ workspaceProjectStatusLabel[project.status] }}</span><span v-if="projectGitStatuses[project.id]?.available" class="project-git-chip" :class="{ warning: projectGitStatuses[project.id].behind > 0 || projectGitStatuses[project.id].changedFiles > 0 || projectGitStatuses[project.id].untracked > 0 }">{{ projectGitStatuses[project.id].behind ? `待更新 ${projectGitStatuses[project.id].behind}` : projectGitStatuses[project.id].changedFiles || projectGitStatuses[project.id].untracked ? '有未提交代码' : 'Git 正常' }}</span></div>
                     <code>{{ projectSourceValue(project) }}</code>
                     <small>{{ project.dockerfilePath ? `Dockerfile · ${project.dockerfilePath}` : project.lastError || '尚未配置 Dockerfile' }}</small>
                   </div>
@@ -2889,6 +2974,15 @@ watch(activeSection, (section) => {
             <button class="secondary-button" :disabled="selectedWorkspaceProject.sourceKind !== 'local'" :title="selectedWorkspaceProject.dockerfilePath ? '重新生成后可在预览中对比、修改再写入' : '生成并预览 Dockerfile'" @click="openDockerfileGenerator(selectedWorkspaceProject)">{{ selectedWorkspaceProject.dockerfilePath ? '重新生成 Dockerfile' : '生成 Dockerfile' }}</button>
             </section>
           </div>
+          <section v-if="selectedWorkspaceProject" class="project-git-panel" aria-label="Git 状态">
+            <div class="project-git-heading"><div><span class="section-kicker">GIT STATUS</span><h3>代码状态</h3></div><div class="project-git-actions"><button class="secondary-button" :disabled="!!projectGitCheckingID" @click="checkProjectGitStatus(selectedWorkspaceProject)">刷新本地状态</button><button class="secondary-button" :disabled="!!projectGitCheckingID || !projectGitStatuses[selectedWorkspaceProject.id]?.upstream" @click="checkProjectGitStatus(selectedWorkspaceProject, true)">{{ projectGitCheckingID === selectedWorkspaceProject.id ? '检查中…' : '检查远端更新' }}</button></div></div>
+            <div v-if="projectGitCheckingID === selectedWorkspaceProject.id && !projectGitStatuses[selectedWorkspaceProject.id]" class="project-git-note">正在读取 Git 工作区…</div>
+            <div v-else-if="!projectGitStatuses[selectedWorkspaceProject.id]?.available" class="project-git-note">{{ projectGitStatuses[selectedWorkspaceProject.id]?.detail || '尚未读取 Git 状态' }}</div>
+            <template v-else>
+              <div class="project-git-metrics"><div><span>分支</span><strong>{{ projectGitStatuses[selectedWorkspaceProject.id].branch }}</strong><small>{{ projectGitStatuses[selectedWorkspaceProject.id].head || '暂无提交' }}</small></div><div><span>未提交改动</span><strong>{{ projectGitStatuses[selectedWorkspaceProject.id].changedFiles + projectGitStatuses[selectedWorkspaceProject.id].untracked }}</strong><small>已暂存 {{ projectGitStatuses[selectedWorkspaceProject.id].stagedFiles }} · 未跟踪 {{ projectGitStatuses[selectedWorkspaceProject.id].untracked }}</small></div><div><span>远端待更新</span><strong>{{ projectGitStatuses[selectedWorkspaceProject.id].upstream ? projectGitStatuses[selectedWorkspaceProject.id].behind : '—' }}</strong><small>本地领先 {{ projectGitStatuses[selectedWorkspaceProject.id].ahead }} 个提交</small></div></div>
+              <p class="project-git-note">{{ projectGitStatuses[selectedWorkspaceProject.id].detail || (projectGitStatuses[selectedWorkspaceProject.id].behind ? '远端有新提交，可先检查本地改动，再自行拉取。' : '已检查远端，当前没有待拉取提交。') }}<span v-if="projectGitStatuses[selectedWorkspaceProject.id].upstream"> · 跟踪 {{ projectGitStatuses[selectedWorkspaceProject.id].upstream }}</span> · {{ formatShortTime(projectGitStatuses[selectedWorkspaceProject.id].checkedAt) }}</p>
+            </template>
+          </section>
         </section>
       </section>
 
@@ -3119,6 +3213,22 @@ watch(activeSection, (section) => {
               <button class="secondary-button" :disabled="commandLineToolInstalling || commandLineTool?.installed || commandLineTool?.conflict" @click="installCommandLineTool">{{ commandLineToolInstalling ? '安装中…' : commandLineTool?.installed ? '已安装' : commandLineTool?.conflict ? '路径被占用' : '安装命令' }}</button>
             </div>
           </div>
+        </section>
+
+        <section class="panel settings-panel build-proxy-panel">
+          <div class="panel-header"><div><span class="section-kicker">BUILDKIT / REGISTRY MIRROR</span><h2>构建镜像代理</h2></div><span class="platform-badge" :class="{ healthy: buildProxySettings.configured }">{{ buildProxySettings.configured ? '已启用' : '未启用' }}</span></div>
+          <div class="settings-row build-proxy-row">
+            <div class="settings-icon">⇄</div>
+            <div class="settings-copy"><strong>iDeploy 专用 BuildKit Builder</strong><span>{{ buildProxySettings.detail }}</span><code v-if="buildProxySettings.builderName">{{ buildProxySettings.builderName }}</code><small>规则只影响 Dockerfile 基础镜像拉取；发布产物仍推送到发布时选择的普通仓库项目。Harbor Proxy Cache 项目只用于拉取，不能作为产物推送目标。</small></div>
+            <div class="build-proxy-form">
+              <div class="build-proxy-fields">
+                <label class="build-proxy-policy"><span>代理策略</span><select v-model="buildProxyMode" :disabled="buildProxySaving"><option value="disabled">停用</option><option value="preferred">优先代理，失败时回退</option><option value="required">强制代理，初始化失败即停止发布</option></select><small>决定代理不可用时是否允许回退到上游仓库。</small></label>
+                <label class="build-proxy-mappings"><span>上游映射</span><textarea v-model="buildProxyRulesText" :disabled="buildProxySaving" spellcheck="false" placeholder="docker.io=harbor.example.com/proxy-dockerhub&#10;ghcr.io=harbor.example.com/proxy-ghcr"></textarea><small>每行一条 <code>upstream=host/proxy-project</code>，不要填写 http://、Tag 或 Digest。</small></label>
+              </div>
+              <div class="build-proxy-actions"><span>保存后，桌面端、CLI 和 MCP 的后续构建统一使用此策略。</span><button class="secondary-button" :disabled="buildProxySaving || (buildProxyMode !== 'disabled' && !buildProxyRulesText.trim())" @click="saveBuildProxySettings">{{ buildProxySaving ? '保存中…' : '保存代理配置' }}</button></div>
+            </div>
+          </div>
+          <div class="mcp-security-note"><strong>MCP 自动继承</strong><span><code>publish_deployment</code> 无需增加参数；桌面端、CLI 和 MCP 的后续发布都会读取这份全局策略。私有代理的认证会复用同主机下已经保存在 iDeploy Keychain 中的 Registry 凭据。</span></div>
         </section>
 
         <section class="panel settings-panel mcp-settings-panel">

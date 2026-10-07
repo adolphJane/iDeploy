@@ -31,6 +31,12 @@ type ProbeResult struct {
 	Detail string
 }
 
+type ContainerReplacement struct {
+	Name        string
+	BackupName  string
+	HadPrevious bool
+}
+
 type Remote struct {
 	command func(context.Context, string, ...string) *exec.Cmd
 }
@@ -124,6 +130,23 @@ func (r *Remote) ListContainers(ctx context.Context, connection Connection) ([]C
 	return containers, nil
 }
 
+func (r *Remote) ContainerLogs(ctx context.Context, connection Connection, containerID string, tail int) (string, error) {
+	if !validContainerID(containerID) {
+		return "", errors.New("invalid container identifier")
+	}
+	if tail <= 0 || tail > 2000 {
+		return "", errors.New("invalid log tail")
+	}
+	output, err := r.runTimeout(ctx, connection, "docker logs --timestamps --tail "+fmt.Sprint(tail)+" "+shellQuote(containerID)+" 2>&1", 30*time.Second)
+	if err != nil {
+		return "", err
+	}
+	if len(output) > 2*1024*1024 {
+		output = output[len(output)-2*1024*1024:]
+	}
+	return output, nil
+}
+
 func (r *Remote) OperateContainer(ctx context.Context, connection Connection, action, containerID string) error {
 	if !validContainerID(containerID) {
 		return errors.New("invalid container identifier")
@@ -161,31 +184,71 @@ func (r *Remote) LoginRegistry(ctx context.Context, connection Connection, regis
 	return nil
 }
 
-// DeployContainer replaces the named container from an immutable image tag.
-// Runtime options are intentionally explicit instead of copied from an old
-// container, so a rollback is deterministic and does not inherit drift.
-func (r *Remote) DeployContainer(ctx context.Context, connection Connection, name, image, restartPolicy string, ports []string) error {
+// DeployContainer stages a replacement while preserving the previous
+// container under a temporary backup name. Call CommitContainerReplacement
+// only after health checks pass, or RollbackContainerReplacement on failure.
+func (r *Remote) DeployContainer(ctx context.Context, connection Connection, name, image, restartPolicy string, ports []string) (ContainerReplacement, error) {
 	if !validContainerID(name) {
-		return errors.New("invalid container name")
+		return ContainerReplacement{}, errors.New("invalid container name")
 	}
 	if err := validateImageReference(image); err != nil {
-		return err
+		return ContainerReplacement{}, err
 	}
 	switch restartPolicy {
 	case "no", "always", "unless-stopped", "on-failure":
 	default:
-		return errors.New("invalid restart policy")
+		return ContainerReplacement{}, errors.New("invalid restart policy")
 	}
+	suffix := fmt.Sprintf(".ideploy-%d", time.Now().UnixNano())
+	backupBase := name
+	if len(backupBase)+len(suffix) > 128 {
+		backupBase = backupBase[:128-len(suffix)]
+	}
+	backupName := backupBase + suffix
 	args := []string{"docker run -d", "--restart " + shellQuote(restartPolicy), "--name " + shellQuote(name)}
 	for _, port := range ports {
 		if !deploymentPortPattern.MatchString(port) {
-			return fmt.Errorf("invalid port mapping %q", port)
+			return ContainerReplacement{}, fmt.Errorf("invalid port mapping %q", port)
 		}
 		args = append(args, "--publish "+shellQuote(port))
 	}
 	args = append(args, shellQuote(image))
-	command := "docker rm -f " + shellQuote(name) + " >/dev/null 2>&1 || true; " + strings.Join(args, " ")
-	_, err := r.runTimeout(ctx, connection, command, 3*time.Minute)
+	command := "had_previous=0; " +
+		"if docker container inspect " + shellQuote(name) + " >/dev/null 2>&1; then " +
+		"docker rename " + shellQuote(name) + " " + shellQuote(backupName) + " || exit $?; had_previous=1; " +
+		"if ! docker stop --time 10 " + shellQuote(backupName) + " >/dev/null; then " +
+		"docker rename " + shellQuote(backupName) + " " + shellQuote(name) + " >/dev/null 2>&1 || true; exit 1; fi; fi; " +
+		"if output=$(" + strings.Join(args, " ") + "); then " +
+		"printf '%s\\nIDEPLOY_PREVIOUS=%s\\n' \"$output\" \"$had_previous\"; " +
+		"else status=$?; docker rm -f " + shellQuote(name) + " >/dev/null 2>&1 || true; " +
+		"if [ \"$had_previous\" = 1 ]; then docker rename " + shellQuote(backupName) + " " + shellQuote(name) + " && docker start " + shellQuote(name) + " >/dev/null; fi; exit \"$status\"; fi"
+	output, err := r.runTimeout(ctx, connection, command, 3*time.Minute)
+	if err != nil {
+		return ContainerReplacement{}, err
+	}
+	return ContainerReplacement{Name: name, BackupName: backupName, HadPrevious: strings.Contains(output, "IDEPLOY_PREVIOUS=1")}, nil
+}
+
+func (r *Remote) CommitContainerReplacement(ctx context.Context, connection Connection, replacement ContainerReplacement) error {
+	if !validContainerID(replacement.Name) || !validContainerID(replacement.BackupName) {
+		return errors.New("invalid container replacement")
+	}
+	if !replacement.HadPrevious {
+		return nil
+	}
+	_, err := r.runTimeout(ctx, connection, "docker rm -f "+shellQuote(replacement.BackupName)+" >/dev/null", 45*time.Second)
+	return err
+}
+
+func (r *Remote) RollbackContainerReplacement(ctx context.Context, connection Connection, replacement ContainerReplacement) error {
+	if !validContainerID(replacement.Name) || !validContainerID(replacement.BackupName) {
+		return errors.New("invalid container replacement")
+	}
+	command := "docker rm -f " + shellQuote(replacement.Name) + " >/dev/null 2>&1 || true"
+	if replacement.HadPrevious {
+		command += "; docker rename " + shellQuote(replacement.BackupName) + " " + shellQuote(replacement.Name) + " && docker start " + shellQuote(replacement.Name) + " >/dev/null"
+	}
+	_, err := r.runTimeout(ctx, connection, command, 60*time.Second)
 	return err
 }
 

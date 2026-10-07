@@ -122,6 +122,10 @@ func (s *SystemService) DetectDeploymentVersion(deploymentID string) (Deployment
 }
 
 func (s *SystemService) PublishDeployment(input DeploymentReleaseInput) (JobView, error) {
+	return s.publishDeployment(input, false)
+}
+
+func (s *SystemService) publishDeployment(input DeploymentReleaseInput, retryFailed bool) (JobView, error) {
 	store, err := s.deploymentStore()
 	if err != nil {
 		return JobView{}, err
@@ -156,8 +160,14 @@ func (s *SystemService) PublishDeployment(input DeploymentReleaseInput) (JobView
 	if err != nil {
 		return JobView{}, err
 	}
-	if err := deployment.ValidateNewVersion(input.Version, history); err != nil {
-		return JobView{}, err
+	var versionErr error
+	if retryFailed {
+		versionErr = deployment.ValidateRetryVersion(input.Version, history)
+	} else {
+		versionErr = deployment.ValidateNewVersion(input.Version, history)
+	}
+	if versionErr != nil {
+		return JobView{}, versionErr
 	}
 	servers, err := s.serverStore()
 	if err != nil {
@@ -171,6 +181,9 @@ func (s *SystemService) PublishDeployment(input DeploymentReleaseInput) (JobView
 	_, err = s.verifyDeploymentServer(probeContext, host)
 	probeCancel()
 	if err != nil {
+		return JobView{}, err
+	}
+	if err := s.validateDeploymentPortAvailability(ctx, target, host); err != nil {
 		return JobView{}, err
 	}
 	if strings.TrimSpace(input.RegistryID) == "" {
@@ -200,7 +213,7 @@ func (s *SystemService) PublishDeployment(input DeploymentReleaseInput) (JobView
 		}
 	}
 	release, err := store.CreateRelease(ctx, deployment.ReleaseInput{
-		DeploymentID: target.ID, RegistryID: input.RegistryID, Action: "deploy", Version: input.Version,
+		DeploymentID: target.ID, RegistryID: input.RegistryID, Action: "deploy", Version: input.Version, AllowRetry: retryFailed,
 	})
 	if err != nil {
 		return JobView{}, err
@@ -212,6 +225,131 @@ func (s *SystemService) PublishDeployment(input DeploymentReleaseInput) (JobView
 		return JobView{}, err
 	}
 	queued, err := runner.Enqueue(ctx, job.NewJob{Type: "deployment.release", LockKey: "server:" + target.ServerID, Payload: string(payload)})
+	if err != nil {
+		_ = store.UpdateRelease(ctx, release.ID, deployment.ReleaseFailed, err.Error(), "", "", "")
+		return JobView{}, err
+	}
+	if err := store.AttachReleaseJob(ctx, release.ID, queued.ID); err != nil {
+		return JobView{}, err
+	}
+	return toJobView(queued), nil
+}
+
+func (s *SystemService) validateDeploymentPortAvailability(ctx context.Context, target deployment.Target, host server.Connection) error {
+	if target.WorkloadKind != "container" {
+		return nil
+	}
+	ports := target.ContainerPorts
+	projects, err := s.projectStore()
+	if err != nil {
+		return err
+	}
+	projectValue, err := projects.Get(ctx, target.ProjectID)
+	if err != nil {
+		return err
+	}
+	if projectValue.SourceKind == project.SourceLocal {
+		if resolved, resolveErr := project.ResolveContainerPorts(projectValue.LocalPath, projectValue.ContextPath, projectValue.DockerfilePath, ports); resolveErr == nil {
+			ports = resolved
+		}
+	}
+	requested := requestedHostPorts(ports)
+	if len(requested) == 0 {
+		return nil
+	}
+	containers, err := server.NewRemote().ListContainers(ctx, host)
+	if err != nil {
+		return fmt.Errorf("发布前无法检查远程端口: %w", err)
+	}
+	used := map[int]string{}
+	for _, container := range containers {
+		if container.Name == target.WorkloadName {
+			continue
+		}
+		for _, port := range publishedHostPorts(container.Ports) {
+			used[port] = container.Name
+		}
+	}
+	conflicts := make([]string, 0)
+	for _, port := range requested {
+		if owner := used[port]; owner != "" {
+			conflicts = append(conflicts, fmt.Sprintf("%d 被 %s 占用", port, owner))
+		}
+	}
+	if len(conflicts) == 0 {
+		return nil
+	}
+	suggestions := suggestAvailablePorts(requested, used)
+	return fmt.Errorf("发布前端口检查失败：%s；建议主机端口：%v", strings.Join(conflicts, "；"), suggestions)
+}
+
+func (s *SystemService) RetryRelease(releaseID string) (JobView, error) {
+	store, err := s.deploymentStore()
+	if err != nil {
+		return JobView{}, err
+	}
+	s.mu.RLock()
+	runner := s.runner
+	s.mu.RUnlock()
+	if runner == nil {
+		return JobView{}, errors.New("job runner is not ready")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	source, err := store.GetRelease(ctx, strings.TrimSpace(releaseID))
+	if err != nil {
+		return JobView{}, err
+	}
+	if source.Action != "deploy" || (source.Status != deployment.ReleaseFailed && source.Status != deployment.ReleaseCanceled) {
+		return JobView{}, errors.New("只能重试失败或取消的普通发布记录")
+	}
+	if source.RegistryID == "" {
+		return JobView{}, errors.New("失败记录缺少镜像仓库，无法重试")
+	}
+	if source.ImageRef == "" && source.Manifest == "" {
+		return s.publishDeployment(DeploymentReleaseInput{
+			DeploymentID: source.DeploymentID, RegistryID: source.RegistryID, Version: source.Version,
+		}, true)
+	}
+	if err := validateRollbackArtifact(source.ImageRef, source.Manifest); err != nil {
+		return JobView{}, fmt.Errorf("失败记录的已推送制品不可恢复: %w", err)
+	}
+	target, err := store.Get(ctx, source.DeploymentID)
+	if err != nil {
+		return JobView{}, err
+	}
+	servers, err := s.serverStore()
+	if err != nil {
+		return JobView{}, err
+	}
+	host, err := servers.Get(ctx, target.ServerID)
+	if err != nil {
+		return JobView{}, err
+	}
+	probeContext, probeCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	host, err = s.verifyDeploymentServer(probeContext, host)
+	probeCancel()
+	if err != nil {
+		return JobView{}, err
+	}
+	if err := s.validateDeploymentPortAvailability(ctx, target, host); err != nil {
+		return JobView{}, err
+	}
+	release, err := store.CreateRelease(ctx, deployment.ReleaseInput{
+		DeploymentID: source.DeploymentID, RegistryID: source.RegistryID, Action: "deploy", Version: source.Version,
+		ImageRef: source.ImageRef, Manifest: source.Manifest, RollbackToID: source.ID, AllowResume: true,
+	})
+	if err != nil {
+		return JobView{}, err
+	}
+	payload, err := json.Marshal(struct {
+		ReleaseID string `json:"releaseId"`
+		SourceID  string `json:"sourceId"`
+	}{ReleaseID: release.ID, SourceID: source.ID})
+	if err != nil {
+		return JobView{}, err
+	}
+	queued, err := runner.Enqueue(ctx, job.NewJob{Type: "deployment.resume", LockKey: "server:" + target.ServerID, Payload: string(payload)})
 	if err != nil {
 		_ = store.UpdateRelease(ctx, release.ID, deployment.ReleaseFailed, err.Error(), "", "", "")
 		return JobView{}, err

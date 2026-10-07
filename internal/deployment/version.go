@@ -86,12 +86,57 @@ func CompareVersion(a, b string) (int, bool) {
 }
 
 func ValidateNewVersion(version string, history []Release) error {
+	return validateVersion(version, history, false)
+}
+
+// ValidateRetryVersion permits reusing a version only when every matching
+// publish attempt failed before a pushed artifact was recorded.
+func ValidateRetryVersion(version string, history []Release) error {
+	return validateVersion(version, history, true)
+}
+
+// ValidateResumeVersion permits a new deploy attempt for the same version when
+// all matching deploy attempts are terminal failures and at least one retained
+// a pushed artifact. The artifact itself is validated separately by callers.
+func ValidateResumeVersion(version string, history []Release) error {
+	if _, _, ok := versionParts(version); !ok {
+		return fmt.Errorf("新发布请使用语义版本，例如 1.0.0、1.0.1 或 1.1.0-rc.1")
+	}
+	foundArtifact := false
+	for _, r := range history {
+		cmp, ok := CompareVersion(version, r.Version)
+		if version == r.Version || (ok && cmp == 0) {
+			if r.Action != "deploy" || (r.Status != ReleaseFailed && r.Status != ReleaseCanceled) {
+				return fmt.Errorf("版本 %s 存在成功或未完成的发布记录，不能恢复部署", version)
+			}
+			if r.ImageRef != "" || r.Manifest != "" {
+				foundArtifact = true
+			}
+			continue
+		}
+		if ok && cmp < 0 {
+			return fmt.Errorf("版本 %s 低于已有版本 %s，请使用更高版本", version, r.Version)
+		}
+	}
+	if !foundArtifact {
+		return fmt.Errorf("版本 %s 没有可恢复的已推送制品", version)
+	}
+	return nil
+}
+
+func validateVersion(version string, history []Release, allowRetry bool) error {
 	if _, _, ok := versionParts(version); !ok {
 		return fmt.Errorf("新发布请使用语义版本，例如 1.0.0、1.0.1 或 1.1.0-rc.1")
 	}
 	for _, r := range history {
 		cmp, ok := CompareVersion(version, r.Version)
 		if version == r.Version || (ok && cmp == 0) {
+			if allowRetry && r.Action == "deploy" && (r.Status == ReleaseFailed || r.Status == ReleaseCanceled) && r.ImageRef == "" {
+				continue
+			}
+			if allowRetry && r.ImageRef != "" {
+				return fmt.Errorf("版本 %s 已有推送制品，不能重新构建覆盖；请使用新版本或从已有 Digest 恢复", version)
+			}
 			return fmt.Errorf("版本 %s 已有发布记录（包括失败记录），请使用新版本", version)
 		}
 		if ok && cmp < 0 {

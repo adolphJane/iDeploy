@@ -478,6 +478,18 @@ h1 { margin: 0; color: var(--ink); font-size: 25px; line-height: 1.1; letter-spa
 .workspace-project-detail-grid dd { margin: 0; overflow: hidden; color: #536158; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-project-detail-grid dd code { color: #5d7166; font-size: 9px; }
 .workspace-project-detail-grid .secondary-button { margin-top: 18px; }
+.project-git-chip { padding: 3px 7px; border-radius: 99px; color: #28764f; background: #e8f4ed; font-size: 8px; font-weight: 700; white-space: nowrap; }
+.project-git-chip.warning { color: #986322; background: #fff1da; }
+.project-git-panel { padding: 24px 28px; border-top: 1px solid #edf0ee; }
+.project-git-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.project-git-heading h3 { margin: 4px 0 0; color: #344139; font-size: 15px; }
+.project-git-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.project-git-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 18px; }
+.project-git-metrics > div { display: grid; min-width: 0; gap: 5px; padding: 14px 16px; border: 1px solid #e5ece7; border-radius: 10px; background: #f9fbf9; }
+.project-git-metrics span { color: #7d8d82; font-size: 10px; }
+.project-git-metrics strong { overflow: hidden; color: #304139; font-size: 20px; text-overflow: ellipsis; white-space: nowrap; }
+.project-git-metrics small, .project-git-note { color: #718078; font-size: 10px; line-height: 1.6; }
+.project-git-note { margin: 15px 0 0; }
 .project-dialog { max-height: calc(100vh - 48px); overflow: auto; }
 .path-picker { display: flex; gap: 8px; }
 .path-picker input { min-width: 0; }
@@ -498,6 +510,20 @@ h1 { margin: 0; color: var(--ink); font-size: 25px; line-height: 1.1; letter-spa
 .settings-copy span, .settings-copy small { color: #62746a; font-size: 11px; line-height: 1.6; }
 .settings-copy small { color: #8a6c6c; }
 .settings-copy code { overflow-wrap: anywhere; color: #86948c; font-size: 10px; line-height: 1.55; user-select: text; }
+.build-proxy-panel .platform-badge.healthy { color: #28764f; background: #e8f4ed; }
+.build-proxy-row { grid-template-columns: 38px minmax(0, 1fr); align-items: start; gap: 14px; padding: 22px 20px; }
+.build-proxy-form { display: grid; grid-column: 2; gap: 14px; min-width: 0; padding-top: 4px; }
+.build-proxy-fields { display: grid; grid-template-columns: minmax(200px, .42fr) minmax(0, 1fr); gap: 14px; align-items: start; min-width: 0; }
+.build-proxy-form label { display: grid; min-width: 0; align-content: start; gap: 7px; color: #52675c; font-size: 11px; font-weight: 700; }
+.build-proxy-form select, .build-proxy-form textarea { width: 100%; border: 1px solid #d9e2dc; border-radius: 8px; color: #334139; background: #fff; font: inherit; font-size: 11px; }
+.build-proxy-form select { height: 42px; padding: 0 10px; }
+.build-proxy-form textarea { height: 88px; min-height: 88px; padding: 10px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.55; }
+.build-proxy-form select:focus, .build-proxy-form textarea:focus { border-color: #73b993; outline: none; box-shadow: 0 0 0 3px rgba(74,168,115,.12); }
+.build-proxy-form label small { min-height: 30px; color: #7c8b83; font-size: 9px; font-weight: 400; line-height: 1.5; }
+.build-proxy-form label small code { color: #52675c; font-size: 9px; }
+.build-proxy-actions { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 16px; padding-top: 13px; border-top: 1px solid #e8eeea; }
+.build-proxy-actions > span { min-width: 0; color: #718279; font-size: 10px; line-height: 1.55; }
+.build-proxy-actions > button { flex: 0 0 auto; min-width: 128px; min-height: 38px; white-space: nowrap; }
 .mcp-settings-panel { overflow: hidden; }
 .mcp-setup-intro { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 14px; align-items: center; padding: 20px; border-bottom: 1px solid #e8eeea; }
 .mcp-setup-intro > div:last-child { display: grid; gap: 6px; }
@@ -730,6 +756,7 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 }
 
 @media (max-width: 760px) {
+  .project-git-metrics { grid-template-columns: minmax(0, 1fr); }
   .database-explorer-toolbar { align-items: center; gap: 8px 11px; }
   .database-toolbar-divider { display: none; }
   .database-metrics-refresh { margin-left: 0; }
@@ -750,6 +777,10 @@ button:disabled { cursor: not-allowed; opacity: .5; }
   .server-address-grid, .server-form-grid, .connection-profile { grid-template-columns: minmax(0, 1fr); }
   .settings-row { grid-template-columns: 38px minmax(0, 1fr); }
   .settings-row > button, .settings-confirm { grid-column: 2; justify-self: start; }
+  .build-proxy-form { grid-column: 1 / -1; }
+  .build-proxy-fields { grid-template-columns: minmax(0, 1fr); }
+  .build-proxy-actions { align-items: flex-start; flex-direction: column; }
+  .build-proxy-actions > button { align-self: stretch; }
   .mcp-setup-grid { grid-template-columns: minmax(0, 1fr); }
   .mcp-security-note { grid-template-columns: minmax(0, 1fr); }
   .ai-settings-form { grid-column: 1 / -1; }

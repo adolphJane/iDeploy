@@ -108,6 +108,39 @@ func (s *Store) Configure(ctx context.Context, id string, input Input) error {
 	return nil
 }
 
+// Update changes the complete local deployment configuration. It never
+// modifies a remote workload; callers publish explicitly after reviewing it.
+func (s *Store) Update(ctx context.Context, id string, input Input) (Target, error) {
+	current, err := s.Get(ctx, id)
+	if err != nil {
+		return Target{}, err
+	}
+	input, err = input.Validate()
+	if err != nil {
+		return Target{}, err
+	}
+	ports, _ := json.Marshal(input.ContainerPorts)
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE deployment_targets
+		SET project_id=?, server_id=?, workload_kind=?, workload_name=?,
+			container_ports_json=?, restart_policy=?, updated_at=?
+		WHERE id=? AND NOT EXISTS (
+			SELECT 1 FROM jobs WHERE status IN ('queued','running','canceling')
+			AND lock_key IN ('server:' || ?, 'server:' || ?)
+		)
+	`, input.ProjectID, input.ServerID, input.WorkloadKind, input.WorkloadName,
+		string(ports), input.RestartPolicy, formatTime(time.Now()), id, current.ServerID, input.ServerID)
+	if err != nil {
+		return Target{}, fmt.Errorf("update deployment target: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return Target{}, err
+	} else if affected == 0 {
+		return Target{}, errors.New("关联不存在或原/目标服务器存在未完成任务，无法修改")
+	}
+	return s.Get(ctx, id)
+}
+
 func (s *Store) UpdateContainerPorts(ctx context.Context, id string, ports []string) error {
 	encoded, err := json.Marshal(ports)
 	if err != nil {
@@ -147,14 +180,14 @@ func (s *Store) CreateRelease(ctx context.Context, input ReleaseInput) (Release,
 	}
 	defer tx.Rollback()
 	if input.Action == "deploy" {
-		rows, err := tx.QueryContext(ctx, `SELECT version FROM deployment_releases WHERE deployment_id=?`, input.DeploymentID)
+		rows, err := tx.QueryContext(ctx, `SELECT version,action,status,image_ref,manifest FROM deployment_releases WHERE deployment_id=?`, input.DeploymentID)
 		if err != nil {
 			return Release{}, err
 		}
 		history := []Release{}
 		for rows.Next() {
 			var r Release
-			if err := rows.Scan(&r.Version); err != nil {
+			if err := rows.Scan(&r.Version, &r.Action, &r.Status, &r.ImageRef, &r.Manifest); err != nil {
 				rows.Close()
 				return Release{}, err
 			}
@@ -165,8 +198,16 @@ func (s *Store) CreateRelease(ctx context.Context, input ReleaseInput) (Release,
 		if err != nil {
 			return Release{}, err
 		}
-		if err := ValidateNewVersion(input.Version, history); err != nil {
-			return Release{}, err
+		var validationErr error
+		if input.AllowResume {
+			validationErr = ValidateResumeVersion(input.Version, history)
+		} else if input.AllowRetry {
+			validationErr = ValidateRetryVersion(input.Version, history)
+		} else {
+			validationErr = ValidateNewVersion(input.Version, history)
+		}
+		if validationErr != nil {
+			return Release{}, validationErr
 		}
 	}
 	id, err := newID()

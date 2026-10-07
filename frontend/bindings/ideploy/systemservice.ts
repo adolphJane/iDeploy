@@ -13,6 +13,10 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
+import * as project$0 from "./internal/project/models.js";
+
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
 import * as $models from "./models.js";
 
 export function BindDeployment(id: string, kind: string, name: string): $CancellablePromise<void> {
@@ -21,6 +25,10 @@ export function BindDeployment(id: string, kind: string, name: string): $Cancell
 
 export function CancelJob(id: string): $CancellablePromise<void> {
     return $Call.ByID(87326605, id);
+}
+
+export function CheckPortAvailability(input: $models.PortAvailabilityInput): $CancellablePromise<$models.PortAvailabilityView> {
+    return $Call.ByID(2783371588, input);
 }
 
 export function ChooseProjectDirectory(): $CancellablePromise<string> {
@@ -37,6 +45,15 @@ export function ClearRuntimeCache(): $CancellablePromise<$models.CleanupView> {
 
 export function ClearServerData(): $CancellablePromise<$models.CleanupView> {
     return $Call.ByID(2951393754);
+}
+
+/**
+ * CloneDeployment creates a new local deployment configuration from an
+ * existing one. Callers normally override the server and workload name because
+ * both project/server and server/workload pairs are unique.
+ */
+export function CloneDeployment(id: string, patch: $models.DeploymentPatchInput): $CancellablePromise<$models.DeploymentView> {
+    return $Call.ByID(575435894, id, patch);
 }
 
 export function ConfigureDeployment(id: string, input: $models.DeploymentInput): $CancellablePromise<void> {
@@ -75,8 +92,16 @@ export function DeleteDeployment(id: string): $CancellablePromise<void> {
     return $Call.ByID(4093308500, id);
 }
 
+export function DeleteDeploymentConfiguration(id: string): $CancellablePromise<void> {
+    return $Call.ByID(2951647646, id);
+}
+
 export function DeleteProject(id: string): $CancellablePromise<void> {
     return $Call.ByID(2319894648, id);
+}
+
+export function DeleteProjectConfiguration(id: string): $CancellablePromise<void> {
+    return $Call.ByID(3673846010, id);
 }
 
 export function DeleteRegistry(id: string): $CancellablePromise<void> {
@@ -104,8 +129,20 @@ export function GetAISettings(): $CancellablePromise<$models.AISettingsView> {
     return $Call.ByID(2968732991);
 }
 
+export function GetBuildProxySettings(): $CancellablePromise<$models.BuildProxySettingsView> {
+    return $Call.ByID(1569951585);
+}
+
 export function GetCommandLineToolStatus(): $CancellablePromise<$models.CommandLineToolStatus> {
     return $Call.ByID(4079405747);
+}
+
+export function GetContainerLogs(input: $models.ContainerLogsInput): $CancellablePromise<$models.ContainerLogsView> {
+    return $Call.ByID(1549012720, input);
+}
+
+export function GetControlOperation(id: string): $CancellablePromise<$models.ControlOperationView> {
+    return $Call.ByID(3586208210, id);
 }
 
 export function GetDatabaseOverview(id: string, schema: string): $CancellablePromise<$models.DatabaseOverviewView> {
@@ -130,6 +167,10 @@ export function GetJob(id: string): $CancellablePromise<$models.JobView> {
 
 export function GetOverview(): $CancellablePromise<$models.Overview> {
     return $Call.ByID(1735807247);
+}
+
+export function InspectDeploymentRuntime(id: string): $CancellablePromise<$models.DeploymentRuntimeView> {
+    return $Call.ByID(1554667597, id);
 }
 
 export function InspectProject(id: string): $CancellablePromise<$models.ProjectView> {
@@ -208,8 +249,31 @@ export function OperateRemoteContainer(serverID: string, containerID: string, ac
     return $Call.ByID(1998580161, serverID, containerID, action);
 }
 
+export function PatchDeployment(id: string, patch: $models.DeploymentPatchInput): $CancellablePromise<$models.DeploymentView> {
+    return $Call.ByID(4257453541, id, patch);
+}
+
+export function PatchProject(id: string, patch: $models.ProjectPatchInput): $CancellablePromise<$models.ProjectView> {
+    return $Call.ByID(3265721807, id, patch);
+}
+
+export function PreflightDeployment(input: $models.DeploymentPreflightInput): $CancellablePromise<$models.DeploymentPreflightView> {
+    return $Call.ByID(328570352, input);
+}
+
+/**
+ * ProjectGitStatus reads local worktree state. Network access is opt-in.
+ */
+export function ProjectGitStatus(id: string, refreshRemote: boolean): $CancellablePromise<project$0.GitStatus> {
+    return $Call.ByID(937060557, id, refreshRemote);
+}
+
 export function PublishDeployment(input: $models.DeploymentReleaseInput): $CancellablePromise<$models.JobView> {
     return $Call.ByID(2143750276, input);
+}
+
+export function RetryRelease(releaseID: string): $CancellablePromise<$models.JobView> {
+    return $Call.ByID(2955566963, releaseID);
 }
 
 export function RollbackDeployment(deploymentID: string, sourceReleaseID: string): $CancellablePromise<$models.JobView> {
@@ -218,6 +282,10 @@ export function RollbackDeployment(deploymentID: string, sourceReleaseID: string
 
 export function RunDiagnostic(): $CancellablePromise<$models.JobView> {
     return $Call.ByID(494404126);
+}
+
+export function SaveBuildProxySettings(input: $models.BuildProxySettingsInput): $CancellablePromise<$models.BuildProxySettingsView> {
+    return $Call.ByID(1466449880, input);
 }
 
 export function SaveDeepSeekAPIKey(key: string): $CancellablePromise<void> {

@@ -496,6 +496,11 @@ func (s *SystemService) startWithPaths(ctx context.Context, serveControl bool, p
 		_ = runtimeLock.Release()
 		return err
 	}
+	if err := recoverInterruptedControlOperations(ctx, db); err != nil {
+		db.Close()
+		_ = runtimeLock.Release()
+		return err
+	}
 	store := job.NewStore(db)
 	registries := registry.NewStore(db)
 	databases := databasebrowser.NewStore(db)
@@ -527,6 +532,7 @@ func (s *SystemService) startWithPaths(ctx context.Context, serveControl bool, p
 	runner.Register("deployment.operation", s.deploymentOperationHandler)
 	runner.Register("deployment.release", s.deploymentReleaseHandler)
 	runner.Register("deployment.rollback", s.deploymentRollbackHandler)
+	runner.Register("deployment.resume", s.deploymentResumeHandler)
 
 	s.mu.Lock()
 	s.db = db
@@ -1098,6 +1104,24 @@ func (s *SystemService) InspectProject(id string) (ProjectView, error) {
 	view := toProjectView(updated)
 	s.emitProjectView(view)
 	return view, nil
+}
+
+// ProjectGitStatus reads local worktree state. Network access is opt-in.
+func (s *SystemService) ProjectGitStatus(id string, refreshRemote bool) (project.GitStatus, error) {
+	projects, err := s.projectStore()
+	if err != nil {
+		return project.GitStatus{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	value, err := projects.Get(ctx, id)
+	if err != nil {
+		return project.GitStatus{}, err
+	}
+	if value.SourceKind != project.SourceLocal {
+		return project.GitStatus{Detail: "Git 仓库地址尚未检出到本机，无法读取工作区状态"}, nil
+	}
+	return project.InspectGit(ctx, value.LocalPath, refreshRemote), nil
 }
 
 func (s *SystemService) DeleteProject(id string) error {

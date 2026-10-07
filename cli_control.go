@@ -21,15 +21,24 @@ import (
 )
 
 type cliRequest struct {
-	Command      string `json:"command"`
-	ID           string `json:"id,omitempty"`
-	RegistryID   string `json:"registryId,omitempty"`
-	Version      string `json:"version,omitempty"`
-	ReleaseID    string `json:"releaseId,omitempty"`
-	DeploymentID string `json:"deploymentId,omitempty"`
-	Limit        int    `json:"limit,omitempty"`
-	Wait         bool   `json:"wait,omitempty"`
-	TimeoutMS    int64  `json:"timeoutMs,omitempty"`
+	Command         string                   `json:"command"`
+	RequestID       string                   `json:"requestId,omitempty"`
+	ID              string                   `json:"id,omitempty"`
+	Project         *ProjectInput            `json:"project,omitempty"`
+	ProjectPatch    *ProjectPatchInput       `json:"projectPatch,omitempty"`
+	Deployment      *DeploymentInput         `json:"deployment,omitempty"`
+	DeploymentPatch *DeploymentPatchInput    `json:"deploymentPatch,omitempty"`
+	BuildProxy      *BuildProxySettingsInput `json:"buildProxy,omitempty"`
+	RegistryID      string                   `json:"registryId,omitempty"`
+	Version         string                   `json:"version,omitempty"`
+	ReleaseID       string                   `json:"releaseId,omitempty"`
+	DeploymentID    string                   `json:"deploymentId,omitempty"`
+	ContainerID     string                   `json:"containerId,omitempty"`
+	Ports           []int                    `json:"ports,omitempty"`
+	Tail            int                      `json:"tail,omitempty"`
+	Limit           int                      `json:"limit,omitempty"`
+	Wait            bool                     `json:"wait,omitempty"`
+	TimeoutMS       int64                    `json:"timeoutMs,omitempty"`
 }
 
 type cliResponse struct {
@@ -116,7 +125,7 @@ func (s *cliControlServer) handle(connection net.Conn) {
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(request.TimeoutMS)*time.Millisecond)
 	}
 	defer cancel()
-	response := executeCLIRequest(ctx, s.service, request)
+	response := executeIdempotentCLIRequest(ctx, s.service, request)
 	_ = json.NewEncoder(connection).Encode(response)
 }
 
@@ -190,14 +199,72 @@ func executeCLIRequest(ctx context.Context, service *SystemService, request cliR
 		value, err = service.GetOverview()
 	case "project.list":
 		value, err = service.ListProjects()
+	case "operation.get":
+		value, err = service.GetControlOperation(request.ID)
+	case "project.create":
+		if request.Project == nil {
+			err = &cliCommandError{Code: "invalid_request", Message: "project configuration is required"}
+		} else {
+			value, err = service.CreateProject(*request.Project)
+		}
+	case "project.update":
+		if request.ProjectPatch == nil {
+			err = &cliCommandError{Code: "invalid_request", Message: "project changes are required"}
+		} else {
+			value, err = service.PatchProject(request.ID, *request.ProjectPatch)
+		}
+	case "project.inspect":
+		value, err = service.InspectProject(request.ID)
+	case "project.delete":
+		err = service.DeleteProjectConfiguration(request.ID)
+		value = map[string]string{"id": request.ID, "status": "deleted"}
 	case "server.list":
 		value, err = service.ListServers()
+	case "server.container.list":
+		value, err = service.ListRemoteContainers(request.ID)
+	case "server.container.logs":
+		value, err = service.GetContainerLogs(ContainerLogsInput{ServerID: request.ID, ContainerID: request.ContainerID, Tail: request.Tail})
+	case "server.port.check":
+		value, err = service.CheckPortAvailability(PortAvailabilityInput{ServerID: request.ID, Ports: request.Ports})
 	case "registry.list":
 		value, err = service.ListRegistries()
+	case "build-proxy.get":
+		value, err = service.GetBuildProxySettings()
+	case "build-proxy.configure":
+		if request.BuildProxy == nil {
+			err = &cliCommandError{Code: "invalid_request", Message: "build proxy configuration is required"}
+		} else {
+			value, err = service.SaveBuildProxySettings(*request.BuildProxy)
+		}
 	case "deployment.list":
 		value, err = service.ListDeployments()
+	case "deployment.create":
+		if request.Deployment == nil {
+			err = &cliCommandError{Code: "invalid_request", Message: "deployment configuration is required"}
+		} else {
+			value, err = service.CreateDeployment(*request.Deployment)
+		}
+	case "deployment.update":
+		if request.DeploymentPatch == nil {
+			err = &cliCommandError{Code: "invalid_request", Message: "deployment changes are required"}
+		} else {
+			value, err = service.PatchDeployment(request.ID, *request.DeploymentPatch)
+		}
+	case "deployment.clone":
+		if request.DeploymentPatch == nil {
+			err = &cliCommandError{Code: "invalid_request", Message: "deployment clone overrides are required"}
+		} else {
+			value, err = service.CloneDeployment(request.ID, *request.DeploymentPatch)
+		}
+	case "deployment.delete":
+		err = service.DeleteDeploymentConfiguration(request.ID)
+		value = map[string]string{"id": request.ID, "status": "deleted"}
 	case "deployment.get":
 		value, err = findDeployment(service, request.ID)
+	case "deployment.preflight":
+		value, err = service.PreflightDeployment(DeploymentPreflightInput{DeploymentID: request.ID, RegistryID: request.RegistryID})
+	case "deployment.runtime":
+		value, err = service.InspectDeploymentRuntime(request.ID)
 	case "deployment.publish":
 		value, err = service.PublishDeployment(DeploymentReleaseInput{DeploymentID: request.ID, RegistryID: request.RegistryID, Version: request.Version})
 		value, err = waitForCLIJobIfNeeded(ctx, service, value, err, request.Wait)
@@ -210,6 +277,9 @@ func executeCLIRequest(ctx context.Context, service *SystemService, request cliR
 		value, err = waitForCLIJobIfNeeded(ctx, service, value, err, request.Wait)
 	case "release.list":
 		value, err = service.ListDeploymentReleases(request.DeploymentID)
+	case "release.retry":
+		value, err = service.RetryRelease(request.ReleaseID)
+		value, err = waitForCLIJobIfNeeded(ctx, service, value, err, request.Wait)
 	case "job.list":
 		var overview Overview
 		overview, err = service.GetOverview()

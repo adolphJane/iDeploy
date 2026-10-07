@@ -27,3 +27,36 @@ func TestVersionPrecedenceAndSuggestion(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestRetryVersionOnlyAllowsUnpublishedFailedAttempts(t *testing.T) {
+	failed := []Release{{Version: "1.0.1", Action: "deploy", Status: ReleaseFailed}}
+	if err := ValidateRetryVersion("1.0.1", failed); err != nil {
+		t.Fatalf("safe retry rejected: %v", err)
+	}
+	for _, history := range [][]Release{
+		{{Version: "1.0.1", Action: "deploy", Status: ReleaseSucceeded}},
+		{{Version: "1.0.1", Action: "deploy", Status: ReleaseFailed, ImageRef: "registry.example/api@sha256:abc"}},
+		{{Version: "1.0.1", Action: "deploy", Status: ReleaseQueued}},
+	} {
+		if err := ValidateRetryVersion("1.0.1", history); err == nil {
+			t.Fatalf("unsafe retry accepted: %#v", history)
+		}
+	}
+}
+
+func TestResumeVersionOnlyAllowsFailedAttemptsWithArtifact(t *testing.T) {
+	history := []Release{{Version: "1.0.1", Action: "deploy", Status: ReleaseFailed, ImageRef: "registry.example/api@sha256:abc"}}
+	if err := ValidateResumeVersion("1.0.1", history); err != nil {
+		t.Fatalf("safe resume rejected: %v", err)
+	}
+	for _, unsafe := range [][]Release{
+		{{Version: "1.0.1", Action: "deploy", Status: ReleaseFailed}},
+		{{Version: "1.0.1", Action: "deploy", Status: ReleaseSucceeded, ImageRef: "registry.example/api@sha256:abc"}},
+		{{Version: "1.0.1", Action: "deploy", Status: ReleasePulling, ImageRef: "registry.example/api@sha256:abc"}},
+		{{Version: "1.0.1", Action: "rollback", Status: ReleaseFailed, ImageRef: "registry.example/api@sha256:abc"}},
+	} {
+		if err := ValidateResumeVersion("1.0.1", unsafe); err == nil {
+			t.Fatalf("unsafe resume accepted: %#v", unsafe)
+		}
+	}
+}

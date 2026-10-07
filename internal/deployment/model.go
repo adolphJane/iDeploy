@@ -79,6 +79,8 @@ type ReleaseInput struct {
 	ImageRef     string
 	Manifest     string
 	RollbackToID string
+	AllowRetry   bool
+	AllowResume  bool
 }
 
 func (input Input) Validate() (Input, error) {
