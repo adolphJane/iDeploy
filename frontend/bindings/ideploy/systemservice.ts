@@ -205,6 +205,10 @@ export function ListDatabaseTables(id: string, schema: string): $CancellableProm
     return $Call.ByID(517597860, id, schema);
 }
 
+export function ListDeploymentEnvironment(deploymentID: string): $CancellablePromise<$models.DeploymentEnvironmentView> {
+    return $Call.ByID(3874054552, deploymentID);
+}
+
 export function ListDeploymentReleases(deploymentID: string): $CancellablePromise<$models.DeploymentReleaseView[] | null> {
     return $Call.ByID(1641944149, deploymentID);
 }
@@ -266,6 +270,15 @@ export function PreflightDeployment(input: $models.DeploymentPreflightInput): $C
  */
 export function ProjectGitStatus(id: string, refreshRemote: boolean): $CancellablePromise<project$0.GitStatus> {
     return $Call.ByID(937060557, id, refreshRemote);
+}
+
+/**
+ * PromptDeploymentSecret opens a local macOS secure text prompt. The secret is
+ * returned only to this process, saved immediately to Keychain, and never sent
+ * through MCP or included in the returned view.
+ */
+export function PromptDeploymentSecret(input: $models.DeploymentSecretPromptInput): $CancellablePromise<$models.DeploymentEnvironmentView> {
+    return $Call.ByID(2709793753, input);
 }
 
 export function PublishDeployment(input: $models.DeploymentReleaseInput): $CancellablePromise<$models.JobView> {
@@ -334,6 +347,10 @@ export function TrustServerHostKey(id: string, fingerprint: string): $Cancellabl
 
 export function UpdateDatabaseConnection(id: string, input: $models.DatabaseConnectionInput): $CancellablePromise<$models.DatabaseConnectionView> {
     return $Call.ByID(4010241084, id, input);
+}
+
+export function UpdateDeploymentEnvironment(input: $models.DeploymentEnvironmentUpdateInput): $CancellablePromise<$models.DeploymentEnvironmentView> {
+    return $Call.ByID(2220956055, input);
 }
 
 export function UpdateProject(id: string, input: $models.ProjectInput): $CancellablePromise<$models.ProjectView> {

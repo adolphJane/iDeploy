@@ -21,24 +21,26 @@ import (
 )
 
 type cliRequest struct {
-	Command         string                   `json:"command"`
-	RequestID       string                   `json:"requestId,omitempty"`
-	ID              string                   `json:"id,omitempty"`
-	Project         *ProjectInput            `json:"project,omitempty"`
-	ProjectPatch    *ProjectPatchInput       `json:"projectPatch,omitempty"`
-	Deployment      *DeploymentInput         `json:"deployment,omitempty"`
-	DeploymentPatch *DeploymentPatchInput    `json:"deploymentPatch,omitempty"`
-	BuildProxy      *BuildProxySettingsInput `json:"buildProxy,omitempty"`
-	RegistryID      string                   `json:"registryId,omitempty"`
-	Version         string                   `json:"version,omitempty"`
-	ReleaseID       string                   `json:"releaseId,omitempty"`
-	DeploymentID    string                   `json:"deploymentId,omitempty"`
-	ContainerID     string                   `json:"containerId,omitempty"`
-	Ports           []int                    `json:"ports,omitempty"`
-	Tail            int                      `json:"tail,omitempty"`
-	Limit           int                      `json:"limit,omitempty"`
-	Wait            bool                     `json:"wait,omitempty"`
-	TimeoutMS       int64                    `json:"timeoutMs,omitempty"`
+	Command               string                            `json:"command"`
+	RequestID             string                            `json:"requestId,omitempty"`
+	ID                    string                            `json:"id,omitempty"`
+	Project               *ProjectInput                     `json:"project,omitempty"`
+	ProjectPatch          *ProjectPatchInput                `json:"projectPatch,omitempty"`
+	Deployment            *DeploymentInput                  `json:"deployment,omitempty"`
+	DeploymentPatch       *DeploymentPatchInput             `json:"deploymentPatch,omitempty"`
+	DeploymentEnvironment *DeploymentEnvironmentUpdateInput `json:"deploymentEnvironment,omitempty"`
+	DeploymentSecretName  string                            `json:"deploymentSecretName,omitempty"`
+	BuildProxy            *BuildProxySettingsInput          `json:"buildProxy,omitempty"`
+	RegistryID            string                            `json:"registryId,omitempty"`
+	Version               string                            `json:"version,omitempty"`
+	ReleaseID             string                            `json:"releaseId,omitempty"`
+	DeploymentID          string                            `json:"deploymentId,omitempty"`
+	ContainerID           string                            `json:"containerId,omitempty"`
+	Ports                 []int                             `json:"ports,omitempty"`
+	Tail                  int                               `json:"tail,omitempty"`
+	Limit                 int                               `json:"limit,omitempty"`
+	Wait                  bool                              `json:"wait,omitempty"`
+	TimeoutMS             int64                             `json:"timeoutMs,omitempty"`
 }
 
 type cliResponse struct {
@@ -265,6 +267,16 @@ func executeCLIRequest(ctx context.Context, service *SystemService, request cliR
 		value, err = service.PreflightDeployment(DeploymentPreflightInput{DeploymentID: request.ID, RegistryID: request.RegistryID})
 	case "deployment.runtime":
 		value, err = service.InspectDeploymentRuntime(request.ID)
+	case "deployment.environment.list":
+		value, err = service.ListDeploymentEnvironment(request.ID)
+	case "deployment.environment.update":
+		if request.DeploymentEnvironment == nil {
+			err = &cliCommandError{Code: "invalid_request", Message: "deployment environment changes are required"}
+		} else {
+			value, err = service.UpdateDeploymentEnvironment(*request.DeploymentEnvironment)
+		}
+	case "deployment.environment.secret.prompt":
+		value, err = service.PromptDeploymentSecret(DeploymentSecretPromptInput{DeploymentID: request.ID, Name: request.DeploymentSecretName})
 	case "deployment.publish":
 		value, err = service.PublishDeployment(DeploymentReleaseInput{DeploymentID: request.ID, RegistryID: request.RegistryID, Version: request.Version})
 		value, err = waitForCLIJobIfNeeded(ctx, service, value, err, request.Wait)

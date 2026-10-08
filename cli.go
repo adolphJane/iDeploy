@@ -148,6 +148,47 @@ func parseCLIArguments(arguments []string) (cliRequest, cliOptions, string, erro
 				return cliRequest{}, options, "", fmt.Errorf("deployment %s requires a deployment ID", action)
 			}
 			request.ID = remaining[0]
+		case "env":
+			if len(remaining) < 2 {
+				return cliRequest{}, options, "", errors.New("deployment env requires list, set, remove, or set-secret followed by a deployment ID")
+			}
+			environmentAction, deploymentID, values := remaining[0], remaining[1], remaining[2:]
+			request.ID = deploymentID
+			switch environmentAction {
+			case "list":
+				if len(values) != 0 {
+					return cliRequest{}, options, "", errors.New("deployment env list accepts only a deployment ID")
+				}
+				request.Command = "deployment.environment.list"
+			case "set":
+				if len(values) == 0 {
+					return cliRequest{}, options, "", errors.New("deployment env set requires one or more KEY=VALUE arguments")
+				}
+				variables := make([]DeploymentEnvironmentVariableInput, 0, len(values))
+				for _, assignment := range values {
+					parts := strings.SplitN(assignment, "=", 2)
+					if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
+						return cliRequest{}, options, "", fmt.Errorf("invalid environment assignment %q; use KEY=VALUE", assignment)
+					}
+					variables = append(variables, DeploymentEnvironmentVariableInput{Name: strings.TrimSpace(parts[0]), Kind: "plain", Value: parts[1]})
+				}
+				request.Command = "deployment.environment.update"
+				request.DeploymentEnvironment = &DeploymentEnvironmentUpdateInput{DeploymentID: deploymentID, Variables: variables}
+			case "remove":
+				if len(values) == 0 {
+					return cliRequest{}, options, "", errors.New("deployment env remove requires one or more variable names")
+				}
+				request.Command = "deployment.environment.update"
+				request.DeploymentEnvironment = &DeploymentEnvironmentUpdateInput{DeploymentID: deploymentID, Remove: values}
+			case "set-secret":
+				if len(values) != 1 {
+					return cliRequest{}, options, "", errors.New("deployment env set-secret requires exactly one variable name")
+				}
+				request.Command = "deployment.environment.secret.prompt"
+				request.DeploymentSecretName = values[0]
+			default:
+				return cliRequest{}, options, "", errors.New("supported deployment env commands: list, set, remove, set-secret")
+			}
 		case "publish":
 			id, flags, err := takeCLIResourceID(remaining, "deployment publish")
 			if err != nil {
@@ -338,6 +379,10 @@ Commands:
   registry list
   deployment list
   deployment get <deployment-id>
+  deployment env list <deployment-id>
+  deployment env set <deployment-id> KEY=VALUE [KEY=VALUE ...]
+  deployment env remove <deployment-id> KEY [KEY ...]
+  deployment env set-secret <deployment-id> KEY
   deployment publish <deployment-id> --registry <registry-id> [--version <version>]
   deployment rollback <deployment-id> --release <release-id>
   deployment start|stop|restart <deployment-id>

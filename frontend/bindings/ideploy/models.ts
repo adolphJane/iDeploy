@@ -147,6 +147,33 @@ export interface DatabaseTableView {
     "type": string;
 }
 
+export interface DeploymentEnvironmentUpdateInput {
+    "deploymentId": string;
+    "variables": DeploymentEnvironmentVariableInput[] | null;
+    "remove": string[] | null;
+}
+
+export interface DeploymentEnvironmentVariableInput {
+    "name": string;
+    "kind": string;
+    "value"?: string;
+}
+
+export interface DeploymentEnvironmentVariableView {
+    "name": string;
+    "kind": string;
+    "value"?: string;
+    "configured": boolean;
+}
+
+export interface DeploymentEnvironmentView {
+    "deploymentId": string;
+    "revision": number;
+    "appliedRevision": number;
+    "pendingApply": boolean;
+    "variables": DeploymentEnvironmentVariableView[] | null;
+}
+
 export interface DeploymentInput {
     "workloadKind": string;
     "workloadName": string;
@@ -203,6 +230,7 @@ export interface DeploymentReleaseView {
     "rollbackToId": string;
     "status": string;
     "detail": string;
+    "environmentRevision": number;
     "createdAt": string;
     "finishedAt": string;
 }
@@ -214,6 +242,11 @@ export interface DeploymentRuntimeView {
     "detail": string;
     "observedAt": string;
     "containers": RemoteContainerView[] | null;
+}
+
+export interface DeploymentSecretPromptInput {
+    "deploymentId": string;
+    "name": string;
 }
 
 export interface DeploymentVersionSuggestionView {
@@ -244,6 +277,9 @@ export interface DeploymentView {
     "desiredState": string;
     "containerPorts": string[] | null;
     "restartPolicy": string;
+    "environmentRevision": number;
+    "appliedEnvironmentRevision": number;
+    "environmentPendingApply": boolean;
     "createdAt": string;
     "updatedAt": string;
 }

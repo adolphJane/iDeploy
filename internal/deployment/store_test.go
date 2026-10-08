@@ -89,3 +89,42 @@ func TestStoreCreatesAndDeletesTarget(t *testing.T) {
 		t.Fatalf("delete deployment target: %v", err)
 	}
 }
+
+func TestDeploymentEnvironmentRevisionAndCleanupMetadata(t *testing.T) {
+	ctx := context.Background()
+	db, err := database.Open(ctx, filepath.Join(t.TempDir(), "environment.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, "INSERT INTO projects(id,name,created_at,updated_at) VALUES('project-1','API','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO servers(id,name,host,port,ssh_user,created_at,updated_at) VALUES('server-1','Dev','127.0.0.1',22,'deploy','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')"); err != nil {
+		t.Fatal(err)
+	}
+	store := deployment.NewStore(db)
+	target, err := store.Create(ctx, deployment.Input{ProjectID: "project-1", ServerID: "server-1", WorkloadKind: "container", WorkloadName: "api"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretRef := deployment.EnvironmentSecretCredentialRef("secret-1")
+	values, cleanup, err := store.ApplyEnvironmentChanges(ctx, target.ID, []deployment.EnvironmentChange{
+		{Name: "DB_MODE", Kind: deployment.EnvironmentKindPlain, PlainValue: "mysql"},
+		{Name: "DATABASE_PASSWORD", Kind: deployment.EnvironmentKindSecret, CredentialRef: secretRef},
+	}, nil)
+	if err != nil || len(cleanup) != 0 || len(values) != 2 {
+		t.Fatalf("apply environment: values=%#v cleanup=%#v err=%v", values, cleanup, err)
+	}
+	target, err = store.Get(ctx, target.ID)
+	if err != nil || target.EnvironmentRevision != 1 || target.AppliedEnvironmentRevision != 0 {
+		t.Fatalf("unexpected environment revision: %#v err=%v", target, err)
+	}
+	if err := store.MarkEnvironmentApplied(ctx, target.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	_, cleanup, err = store.ApplyEnvironmentChanges(ctx, target.ID, nil, []string{"DATABASE_PASSWORD"})
+	if err != nil || len(cleanup) != 1 || cleanup[0] != secretRef {
+		t.Fatalf("remove secret: cleanup=%#v err=%v", cleanup, err)
+	}
+}

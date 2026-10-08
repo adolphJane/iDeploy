@@ -114,16 +114,48 @@ func TestDeployContainerBuildsControlledDockerCommand(t *testing.T) {
 	_, err := remote.DeployContainer(context.Background(), Connection{Host: "example.com", Port: 22, SSHUser: "deploy"}, "api", "registry.example/team/api:v1", "unless-stopped", []string{"8080:80"}, map[string]string{
 		"com.ideploy.pinned-image": "registry.example/team/api@sha256:abc",
 		"com.ideploy.version":      "v1",
-	})
+	}, nil)
 	joined := strings.Join(arguments, " ")
 	if err != nil || !containsAll(joined, "docker rename 'api'", "--publish '8080:80'", "--label 'com.ideploy.pinned-image=registry.example/team/api@sha256:abc'", "--label 'com.ideploy.version=v1'", "'registry.example/team/api:v1'", "IDEPLOY_PREVIOUS") {
 		t.Fatalf("unexpected deployment command: err=%v args=%v", err, arguments)
 	}
-	if _, err := remote.DeployContainer(context.Background(), Connection{}, "api; touch /tmp/pwned", "image:v1", "always", nil, nil); err == nil {
+	if _, err := remote.DeployContainer(context.Background(), Connection{}, "api; touch /tmp/pwned", "image:v1", "always", nil, nil, nil); err == nil {
 		t.Fatal("accepted unsafe container name")
 	}
-	if _, err := remote.DeployContainer(context.Background(), Connection{}, "api", "image:v1", "always", nil, map[string]string{"unsafe key": "value"}); err == nil {
+	if _, err := remote.DeployContainer(context.Background(), Connection{}, "api", "image:v1", "always", nil, map[string]string{"unsafe key": "value"}, nil); err == nil {
 		t.Fatal("accepted unsafe container label")
+	}
+}
+
+func TestDeployContainerPassesEnvironmentByStdin(t *testing.T) {
+	var arguments []string
+	remote := &Remote{command: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		arguments = append(arguments, args...)
+		return exec.CommandContext(ctx, "sh", "-c", "cat >/dev/null; printf ok")
+	}}
+	secret := "database-password-value"
+	_, err := remote.DeployContainer(context.Background(), Connection{Host: "example.com", Port: 22, SSHUser: "deploy"}, "api", "registry.example/team/api:v1", "unless-stopped", nil, nil, map[string]string{
+		"DB_MODE": "mysql", "DATABASE_PASSWORD": secret,
+	})
+	joined := strings.Join(arguments, " ")
+	if err != nil || !containsAll(joined, "--env-file", "mktemp", "ideploy-env") {
+		t.Fatalf("environment file command missing: err=%v args=%v", err, arguments)
+	}
+	if strings.Contains(joined, secret) || strings.Contains(joined, "DATABASE_PASSWORD") {
+		t.Fatalf("environment leaked into SSH arguments: %s", joined)
+	}
+}
+
+func TestDockerEnvironmentFileIsDeterministicAndValidated(t *testing.T) {
+	contents, err := dockerEnvironmentFile(map[string]string{"Z_VALUE": "last", "A_VALUE": "first=with#symbols"})
+	if err != nil || contents != "A_VALUE=first=with#symbols\nZ_VALUE=last\n" {
+		t.Fatalf("unexpected environment file: %q err=%v", contents, err)
+	}
+	if _, err := dockerEnvironmentFile(map[string]string{"BAD-NAME": "value"}); err == nil {
+		t.Fatal("accepted invalid environment variable name")
+	}
+	if _, err := dockerEnvironmentFile(map[string]string{"SECRET": "line1\nline2"}); err == nil {
+		t.Fatal("accepted multiline environment variable value")
 	}
 }
 

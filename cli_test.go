@@ -52,6 +52,28 @@ func TestParseCLINoWaitAfterSubcommand(t *testing.T) {
 	}
 }
 
+func TestParseCLIDeploymentEnvironmentCommands(t *testing.T) {
+	setRequest, _, _, err := parseCLIArguments([]string{"deployment", "env", "set", "deployment-1", "DB_MODE=mysql", "DATABASE_PORT=3306"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if setRequest.Command != "deployment.environment.update" || setRequest.DeploymentEnvironment == nil || len(setRequest.DeploymentEnvironment.Variables) != 2 || setRequest.DeploymentEnvironment.Variables[0].Value != "mysql" {
+		t.Fatalf("unexpected environment set request: %#v", setRequest)
+	}
+	listRequest, _, _, err := parseCLIArguments([]string{"deployment", "env", "list", "deployment-1"})
+	if err != nil || listRequest.Command != "deployment.environment.list" || listRequest.ID != "deployment-1" {
+		t.Fatalf("unexpected environment list request: %#v err=%v", listRequest, err)
+	}
+	removeRequest, _, _, err := parseCLIArguments([]string{"deployment", "env", "remove", "deployment-1", "OLD_KEY"})
+	if err != nil || removeRequest.DeploymentEnvironment == nil || len(removeRequest.DeploymentEnvironment.Remove) != 1 {
+		t.Fatalf("unexpected environment remove request: %#v err=%v", removeRequest, err)
+	}
+	secretRequest, _, _, err := parseCLIArguments([]string{"deployment", "env", "set-secret", "deployment-1", "DATABASE_PASSWORD"})
+	if err != nil || secretRequest.Command != "deployment.environment.secret.prompt" || secretRequest.DeploymentSecretName != "DATABASE_PASSWORD" {
+		t.Fatalf("unexpected environment secret request: %#v err=%v", secretRequest, err)
+	}
+}
+
 func TestRunCLIVersionJSON(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

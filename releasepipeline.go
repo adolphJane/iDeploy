@@ -665,11 +665,23 @@ func (s *SystemService) deploymentArtifactHandler(ctx context.Context, task job.
 }
 
 func (s *SystemService) deployAndCheckContainer(ctx context.Context, deployments *deployment.Store, release deployment.Release, target deployment.Target, host server.Connection, reporter job.Reporter, remote *server.Remote, imageRef, runtimeImageRef, revision, manifest string) error {
+	currentTarget, environment, err := s.resolveDeploymentEnvironmentRevision(ctx, deployments, target.ID)
+	if err != nil {
+		return err
+	}
+	target = currentTarget
+	if err := deployments.SetReleaseEnvironmentRevision(ctx, release.ID, target.EnvironmentRevision); err != nil {
+		return err
+	}
+	if len(environment) > 0 {
+		reporter.Log(fmt.Sprintf("正在注入 %d 个运行环境变量", len(environment)))
+	}
 	replacement, err := remote.DeployContainer(ctx, host, target.WorkloadName, runtimeImageRef, target.RestartPolicy, target.ContainerPorts, map[string]string{
-		"com.ideploy.pinned-image": imageRef,
-		"com.ideploy.release-id":   release.ID,
-		"com.ideploy.version":      release.Version,
-	})
+		"com.ideploy.pinned-image":         imageRef,
+		"com.ideploy.release-id":           release.ID,
+		"com.ideploy.version":              release.Version,
+		"com.ideploy.environment-revision": fmt.Sprint(target.EnvironmentRevision),
+	}, environment)
 	if err != nil {
 		return err
 	}
@@ -682,6 +694,9 @@ func (s *SystemService) deployAndCheckContainer(ctx context.Context, deployments
 		return commitErr
 	})
 	if err == nil {
+		if applyErr := deployments.MarkEnvironmentApplied(ctx, target.ID, target.EnvironmentRevision); applyErr != nil {
+			return fmt.Errorf("容器已更新，但记录环境配置应用状态失败: %w", applyErr)
+		}
 		return nil
 	}
 	if committed {

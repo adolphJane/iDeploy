@@ -491,6 +491,9 @@ func (s *SystemService) deploymentOperationHandler(ctx context.Context, task job
 	if len(selected) == 0 {
 		return errors.New("远端工作负载不存在，请刷新并检查绑定")
 	}
+	if p.Action == "restart" && target.WorkloadKind == "container" {
+		return s.recreateDeploymentContainer(ctx, store, target, host, selected, reporter, remote)
+	}
 	if p.Action != "restart" {
 		desired := "running"
 		if p.Action == "stop" {
@@ -533,4 +536,71 @@ func (s *SystemService) deploymentOperationHandler(ctx context.Context, task job
 	}
 	reporter.Progress(95, "已核对远端状态；未配置健康检查的服务仅验证运行状态")
 	return errors.Join(failures...)
+}
+
+func (s *SystemService) recreateDeploymentContainer(ctx context.Context, store *deployment.Store, target deployment.Target, host server.Connection, selected []server.Container, reporter job.Reporter, remote *server.Remote) error {
+	if len(selected) != 1 {
+		return errors.New("单容器部署匹配到多个远端容器，无法安全重建")
+	}
+	currentTarget, environment, err := s.resolveDeploymentEnvironmentRevision(ctx, store, target.ID)
+	if err != nil {
+		return err
+	}
+	target = currentTarget
+	image := selected[0].Image
+	labels := map[string]string{"com.ideploy.environment-revision": fmt.Sprint(target.EnvironmentRevision)}
+	if release, releaseErr := store.LatestSucceededRelease(ctx, target.ID); releaseErr == nil {
+		if tagged, tagErr := runtimeTaggedImageReference(release.ImageRef, release.Version); tagErr == nil {
+			image = tagged
+		}
+		labels["com.ideploy.pinned-image"] = release.ImageRef
+		labels["com.ideploy.release-id"] = release.ID
+		labels["com.ideploy.version"] = release.Version
+	}
+	reporter.Progress(20, fmt.Sprintf("正在使用原镜像重建容器并注入 %d 个环境变量", len(environment)))
+	replacement, err := remote.DeployContainer(ctx, host, target.WorkloadName, image, target.RestartPolicy, target.ContainerPorts, labels, environment)
+	if err != nil {
+		return err
+	}
+	deadline := time.Now().Add(90 * time.Second)
+	lastDetail := "尚未发现重建后的容器"
+	for {
+		containers, inspectErr := remote.ListContainers(ctx, host)
+		if inspectErr != nil {
+			lastDetail = inspectErr.Error()
+		} else {
+			matched := deployment.Match(target, containers)
+			if len(matched) == 1 && matched[0].State == "running" && matched[0].Health != "unhealthy" && matched[0].Health != "starting" {
+				if err := remote.CommitContainerReplacement(ctx, host, replacement); err != nil {
+					return fmt.Errorf("新容器已运行，但清理旧容器失败: %w", err)
+				}
+				if err := store.MarkEnvironmentApplied(ctx, target.ID, target.EnvironmentRevision); err != nil {
+					return fmt.Errorf("新容器已运行，但记录环境配置应用状态失败: %w", err)
+				}
+				reporter.Progress(95, "容器已重建并应用最新运行配置")
+				return nil
+			}
+			if len(matched) == 1 {
+				lastDetail = matched[0].State + " / " + matched[0].Health
+			}
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			lastDetail = ctx.Err().Error()
+			break
+		case <-time.After(3 * time.Second):
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	restoreContext, cancel := context.WithTimeout(context.Background(), 75*time.Second)
+	defer cancel()
+	if restoreErr := remote.RollbackContainerReplacement(restoreContext, host, replacement); restoreErr != nil {
+		return errors.Join(fmt.Errorf("重建后健康检查失败: %s", lastDetail), fmt.Errorf("恢复上一容器失败: %w", restoreErr))
+	}
+	return fmt.Errorf("重建后健康检查失败: %s；已恢复上一容器", lastDetail)
 }

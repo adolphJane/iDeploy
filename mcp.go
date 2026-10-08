@@ -22,7 +22,7 @@ const (
 	mcpMaximumTimeout   = 24 * time.Hour
 )
 
-const mcpInstructions = `Use list tools to resolve project, server, deployment, registry, release, and job IDs before referencing existing resources. Project, deployment, and build-proxy configuration tools only save local iDeploy configuration; they do not publish or change remote workloads. Supply a stable request_id for configuration writes and use get_operation after operation_pending or an uncertain local-control timeout. Run preflight_deployment before publishing. Publishing automatically uses the global build proxy policy returned by get_build_proxy_settings and blocks known host-port conflicts before building. Remote workload mutation tools must only be called after the user explicitly requests the exact action. retry_release safely rebuilds failures without an artifact and directly resumes deployment when an immutable pushed artifact was retained. Do not automatically retry other mutations after a timeout; inspect list_jobs or get_job first. Never request, expose, or return registry credentials, SSH credentials, or Keychain values. Asynchronous operations require iDeploy.app to be running; otherwise use the default wait=true behavior.`
+const mcpInstructions = `Use list tools to resolve project, server, deployment, registry, release, and job IDs before referencing existing resources. Project, deployment, deployment-environment, and build-proxy configuration tools only save local iDeploy configuration; they do not publish or change remote workloads. Supply a stable request_id for configuration writes and use get_operation after operation_pending or an uncertain local-control timeout. Run preflight_deployment before publishing. Publishing automatically uses the global build proxy policy returned by get_build_proxy_settings and blocks known host-port conflicts before building. Plain deployment environment variables may be managed through MCP; use request_deployment_secret_input for secrets so their values are entered in a local hidden-input dialog and never pass through MCP. A single-container restart recreates the container to apply current runtime configuration. Remote workload mutation tools must only be called after the user explicitly requests the exact action. retry_release safely rebuilds failures without an artifact and directly resumes deployment when an immutable pushed artifact was retained. Do not automatically retry other mutations after a timeout; inspect list_jobs or get_job first. Never request, expose, or return registry credentials, SSH credentials, deployment secrets, or Keychain values. Asynchronous operations require iDeploy.app to be running; otherwise use the default wait=true behavior.`
 
 type mcpRequestExecutor func(context.Context, cliRequest) cliResponse
 
@@ -143,6 +143,19 @@ type mcpConfigureBuildProxyInput struct {
 
 type mcpDeploymentInput struct {
 	DeploymentID string `json:"deployment_id" jsonschema:"stable deployment identifier returned by list_deployments"`
+}
+
+type mcpUpdateDeploymentEnvironmentInput struct {
+	RequestID    string            `json:"request_id,omitempty" jsonschema:"optional caller-generated idempotency key; reuse it when retrying an uncertain request"`
+	DeploymentID string            `json:"deployment_id" jsonschema:"stable single-container deployment identifier"`
+	Variables    map[string]string `json:"variables,omitempty" jsonschema:"plain non-secret environment variables to create or replace"`
+	Remove       []string          `json:"remove,omitempty" jsonschema:"environment variable names to remove; removing a configured secret also deletes it from Keychain"`
+}
+
+type mcpDeploymentSecretPromptInput struct {
+	RequestID    string `json:"request_id,omitempty" jsonschema:"optional caller-generated idempotency key; reuse it when retrying an uncertain request"`
+	DeploymentID string `json:"deployment_id" jsonschema:"stable single-container deployment identifier"`
+	Name         string `json:"name" jsonschema:"secret environment variable name; the value is entered only in a local macOS secure prompt"`
 }
 
 type mcpPreflightDeploymentInput struct {
@@ -360,6 +373,16 @@ func registerMCPReadTools(server *mcp.Server, service *mcpService) {
 	}, "Inspected the remote deployment runtime.")
 
 	registerMCPCommandTool(server, service, &mcp.Tool{
+		Name: "list_deployment_environment", Description: "List runtime environment configuration for one deployment. Plain values are returned; secret values are never returned and are represented only by their name and configured status.",
+		Annotations: mcpReadAnnotations("List deployment environment", false),
+	}, mcpReadTimeout, func(input mcpDeploymentInput) (cliRequest, error) {
+		if err := requireMCPValue("deployment_id", input.DeploymentID); err != nil {
+			return cliRequest{}, err
+		}
+		return cliRequest{Command: "deployment.environment.list", ID: strings.TrimSpace(input.DeploymentID)}, nil
+	}, "Listed the deployment environment without exposing secret values.")
+
+	registerMCPCommandTool(server, service, &mcp.Tool{
 		Name: "list_releases", Description: "List recorded releases for one deployment. Use the returned release IDs for rollback.",
 		Annotations: mcpReadAnnotations("List deployment releases", false),
 	}, mcpReadTimeout, func(input mcpDeploymentInput) (cliRequest, error) {
@@ -507,6 +530,39 @@ func registerMCPMutationTools(server *mcp.Server, service *mcpService) {
 			WorkloadName: input.WorkloadName, ContainerPorts: input.ContainerPorts, RestartPolicy: input.RestartPolicy,
 		}}, nil
 	}, "Updated the iDeploy deployment configuration.")
+
+	registerMCPCommandTool(server, service, &mcp.Tool{
+		Name: "update_deployment_environment", Description: "Create, replace, or remove plain runtime environment variables for a single-container deployment. Raw secret values are intentionally not accepted by MCP; use request_deployment_secret_input for them. Changes are applied on the next publish or restart.",
+		Annotations: mcpConfigurationAnnotations("Update deployment environment"),
+	}, mcpReadTimeout, func(input mcpUpdateDeploymentEnvironmentInput) (cliRequest, error) {
+		if err := requireMCPValue("deployment_id", input.DeploymentID); err != nil {
+			return cliRequest{}, err
+		}
+		variables := make([]DeploymentEnvironmentVariableInput, 0, len(input.Variables))
+		for name, value := range input.Variables {
+			variables = append(variables, DeploymentEnvironmentVariableInput{Name: name, Kind: "plain", Value: value})
+		}
+		return cliRequest{
+			Command: "deployment.environment.update", RequestID: strings.TrimSpace(input.RequestID),
+			DeploymentEnvironment: &DeploymentEnvironmentUpdateInput{DeploymentID: strings.TrimSpace(input.DeploymentID), Variables: variables, Remove: input.Remove},
+		}, nil
+	}, "Updated plain deployment environment variables without exposing secrets.")
+
+	registerMCPCommandTool(server, service, &mcp.Tool{
+		Name: "request_deployment_secret_input", Description: "Open a local macOS hidden-input dialog for one deployment secret. The secret value never passes through MCP and the result contains only sanitized configuration status. Changes are applied on the next publish or restart.",
+		Annotations: mcpConfigurationAnnotations("Request secure deployment secret input"),
+	}, 5*time.Minute, func(input mcpDeploymentSecretPromptInput) (cliRequest, error) {
+		if err := requireMCPValue("deployment_id", input.DeploymentID); err != nil {
+			return cliRequest{}, err
+		}
+		if err := requireMCPValue("name", input.Name); err != nil {
+			return cliRequest{}, err
+		}
+		return cliRequest{
+			Command: "deployment.environment.secret.prompt", RequestID: strings.TrimSpace(input.RequestID),
+			ID: strings.TrimSpace(input.DeploymentID), DeploymentSecretName: strings.TrimSpace(input.Name), TimeoutMS: (5 * time.Minute).Milliseconds(),
+		}, nil
+	}, "Stored the deployment secret in Keychain without returning its value.")
 
 	registerMCPCommandTool(server, service, &mcp.Tool{
 		Name: "clone_deployment", Description: "Clone an existing local deployment configuration for another server or workload name. The clone has no release history and does not change any remote workload.",

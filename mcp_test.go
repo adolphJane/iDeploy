@@ -39,8 +39,9 @@ func TestMCPListsExpectedTools(t *testing.T) {
 		"get_version": false, "doctor": false, "list_projects": false, "validate_project": false, "create_project": false, "update_project": false, "delete_project": false,
 		"list_servers": false, "list_remote_containers": false, "get_container_logs": false, "check_port_availability": false,
 		"list_registries": false, "get_build_proxy_settings": false, "configure_build_proxy": false,
-		"get_operation": false, "list_deployments": false,
+		"get_operation": false, "list_deployments": false, "list_deployment_environment": false,
 		"create_deployment": false, "update_deployment": false, "clone_deployment": false, "delete_deployment": false, "get_deployment": false, "preflight_deployment": false, "inspect_deployment_runtime": false, "list_releases": false, "list_jobs": false,
+		"update_deployment_environment": false, "request_deployment_secret_input": false,
 		"get_job": false, "wait_job": false, "publish_deployment": false,
 		"rollback_deployment": false, "retry_release": false, "start_deployment": false,
 		"stop_deployment": false, "restart_deployment": false, "cancel_job": false,
@@ -57,7 +58,7 @@ func TestMCPListsExpectedTools(t *testing.T) {
 				t.Fatal("publish_deployment must be annotated as a destructive mutation")
 			}
 		}
-		if tool.Name == "create_project" || tool.Name == "update_project" || tool.Name == "validate_project" || tool.Name == "create_deployment" || tool.Name == "update_deployment" || tool.Name == "clone_deployment" || tool.Name == "configure_build_proxy" {
+		if tool.Name == "create_project" || tool.Name == "update_project" || tool.Name == "validate_project" || tool.Name == "create_deployment" || tool.Name == "update_deployment" || tool.Name == "update_deployment_environment" || tool.Name == "request_deployment_secret_input" || tool.Name == "clone_deployment" || tool.Name == "configure_build_proxy" {
 			if tool.Annotations == nil || tool.Annotations.ReadOnlyHint || tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint {
 				t.Fatalf("%s must be annotated as a non-destructive configuration write", tool.Name)
 			}
@@ -67,6 +68,40 @@ func TestMCPListsExpectedTools(t *testing.T) {
 		if !found {
 			t.Errorf("MCP tool %q was not registered", name)
 		}
+	}
+}
+
+func TestMCPDeploymentEnvironmentToolsMapSanitizedRequests(t *testing.T) {
+	requests := make(chan cliRequest, 3)
+	client, closeSessions := connectMCPTestClient(t, func(_ context.Context, request cliRequest) cliResponse {
+		requests <- request
+		return cliResponseFromValue(map[string]any{"configured": true})
+	})
+	defer closeSessions()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if result, err := client.CallTool(ctx, &mcp.CallToolParams{Name: "list_deployment_environment", Arguments: map[string]any{"deployment_id": "deployment-1"}}); err != nil || result.IsError {
+		t.Fatalf("list environment failed: result=%#v err=%v", result, err)
+	}
+	if result, err := client.CallTool(ctx, &mcp.CallToolParams{Name: "update_deployment_environment", Arguments: map[string]any{
+		"request_id": "deployment-env-001", "deployment_id": "deployment-1", "variables": map[string]any{"DB_MODE": "mysql"}, "remove": []any{"OLD_KEY"},
+	}}); err != nil || result.IsError {
+		t.Fatalf("update environment failed: result=%#v err=%v", result, err)
+	}
+	if result, err := client.CallTool(ctx, &mcp.CallToolParams{Name: "request_deployment_secret_input", Arguments: map[string]any{
+		"request_id": "deployment-secret-001", "deployment_id": "deployment-1", "name": "DATABASE_PASSWORD",
+	}}); err != nil || result.IsError {
+		t.Fatalf("secret prompt failed: result=%#v err=%v", result, err)
+	}
+	listed, updated, prompted := <-requests, <-requests, <-requests
+	if listed.Command != "deployment.environment.list" || listed.ID != "deployment-1" {
+		t.Fatalf("unexpected environment list mapping: %#v", listed)
+	}
+	if updated.Command != "deployment.environment.update" || updated.RequestID != "deployment-env-001" || updated.DeploymentEnvironment == nil || len(updated.DeploymentEnvironment.Variables) != 1 || updated.DeploymentEnvironment.Variables[0].Value != "mysql" {
+		t.Fatalf("unexpected environment update mapping: %#v", updated)
+	}
+	if prompted.Command != "deployment.environment.secret.prompt" || prompted.DeploymentSecretName != "DATABASE_PASSWORD" || prompted.DeploymentEnvironment != nil {
+		t.Fatalf("unexpected secret prompt mapping: %#v", prompted)
 	}
 }
 

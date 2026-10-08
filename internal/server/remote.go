@@ -42,6 +42,8 @@ type Remote struct {
 	command func(context.Context, string, ...string) *exec.Cmd
 }
 
+var environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
+
 func NewRemote() *Remote {
 	return &Remote{command: exec.CommandContext}
 }
@@ -209,7 +211,7 @@ func (r *Remote) LoginRegistry(ctx context.Context, connection Connection, regis
 // DeployContainer stages a replacement while preserving the previous
 // container under a temporary backup name. Call CommitContainerReplacement
 // only after health checks pass, or RollbackContainerReplacement on failure.
-func (r *Remote) DeployContainer(ctx context.Context, connection Connection, name, image, restartPolicy string, ports []string, labels map[string]string) (ContainerReplacement, error) {
+func (r *Remote) DeployContainer(ctx context.Context, connection Connection, name, image, restartPolicy string, ports []string, labels map[string]string, environment map[string]string) (ContainerReplacement, error) {
 	if !validContainerID(name) {
 		return ContainerReplacement{}, errors.New("invalid container name")
 	}
@@ -228,6 +230,13 @@ func (r *Remote) DeployContainer(ctx context.Context, connection Connection, nam
 	}
 	backupName := backupBase + suffix
 	args := []string{"docker run -d", "--restart " + shellQuote(restartPolicy), "--name " + shellQuote(name)}
+	environmentInput, err := dockerEnvironmentFile(environment)
+	if err != nil {
+		return ContainerReplacement{}, err
+	}
+	if len(environment) > 0 {
+		args = append(args, `--env-file "$env_file"`)
+	}
 	labelKeys := make([]string, 0, len(labels))
 	for key, value := range labels {
 		if !dockerLabelKeyPattern.MatchString(key) || len(key) > 128 || value == "" || len(value) > 1024 || strings.ContainsAny(value, "\r\n") {
@@ -246,20 +255,54 @@ func (r *Remote) DeployContainer(ctx context.Context, connection Connection, nam
 		args = append(args, "--publish "+shellQuote(port))
 	}
 	args = append(args, shellQuote(image))
-	command := "had_previous=0; " +
+	command := "had_previous=0; "
+	if len(environment) > 0 {
+		command = `umask 077; env_file=$(mktemp "${TMPDIR:-/tmp}/ideploy-env.XXXXXX") || exit $?; trap 'rm -f "$env_file"' EXIT HUP INT TERM; cat > "$env_file" || exit $?; ` + command
+	}
+	command +=
 		"if docker container inspect " + shellQuote(name) + " >/dev/null 2>&1; then " +
-		"docker rename " + shellQuote(name) + " " + shellQuote(backupName) + " || exit $?; had_previous=1; " +
-		"if ! docker stop --time 10 " + shellQuote(backupName) + " >/dev/null; then " +
-		"docker rename " + shellQuote(backupName) + " " + shellQuote(name) + " >/dev/null 2>&1 || true; exit 1; fi; fi; " +
-		"if output=$(" + strings.Join(args, " ") + "); then " +
-		"printf '%s\\nIDEPLOY_PREVIOUS=%s\\n' \"$output\" \"$had_previous\"; " +
-		"else status=$?; docker rm -f " + shellQuote(name) + " >/dev/null 2>&1 || true; " +
-		"if [ \"$had_previous\" = 1 ]; then docker rename " + shellQuote(backupName) + " " + shellQuote(name) + " && docker start " + shellQuote(name) + " >/dev/null; fi; exit \"$status\"; fi"
-	output, err := r.runTimeout(ctx, connection, command, 3*time.Minute)
+			"docker rename " + shellQuote(name) + " " + shellQuote(backupName) + " || exit $?; had_previous=1; " +
+			"if ! docker stop --time 10 " + shellQuote(backupName) + " >/dev/null; then " +
+			"docker rename " + shellQuote(backupName) + " " + shellQuote(name) + " >/dev/null 2>&1 || true; exit 1; fi; fi; " +
+			"if output=$(" + strings.Join(args, " ") + "); then " +
+			"printf '%s\\nIDEPLOY_PREVIOUS=%s\\n' \"$output\" \"$had_previous\"; " +
+			"else status=$?; docker rm -f " + shellQuote(name) + " >/dev/null 2>&1 || true; " +
+			"if [ \"$had_previous\" = 1 ]; then docker rename " + shellQuote(backupName) + " " + shellQuote(name) + " && docker start " + shellQuote(name) + " >/dev/null; fi; exit \"$status\"; fi"
+	var output string
+	if len(environment) > 0 {
+		output, err = r.runTimeoutWithInput(ctx, connection, command, 3*time.Minute, environmentInput)
+	} else {
+		output, err = r.runTimeout(ctx, connection, command, 3*time.Minute)
+	}
 	if err != nil {
 		return ContainerReplacement{}, err
 	}
 	return ContainerReplacement{Name: name, BackupName: backupName, HadPrevious: strings.Contains(output, "IDEPLOY_PREVIOUS=1")}, nil
+}
+
+func dockerEnvironmentFile(environment map[string]string) (string, error) {
+	if len(environment) > 128 {
+		return "", errors.New("too many container environment variables")
+	}
+	keys := make([]string, 0, len(environment))
+	for key, value := range environment {
+		if !environmentNamePattern.MatchString(key) {
+			return "", fmt.Errorf("invalid environment variable name %q", key)
+		}
+		if len(value) > 65536 || strings.ContainsAny(value, "\x00\r\n") {
+			return "", fmt.Errorf("invalid environment variable value for %s", key)
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var content strings.Builder
+	for _, key := range keys {
+		content.WriteString(key)
+		content.WriteByte('=')
+		content.WriteString(environment[key])
+		content.WriteByte('\n')
+	}
+	return content.String(), nil
 }
 
 func (r *Remote) CommitContainerReplacement(ctx context.Context, connection Connection, replacement ContainerReplacement) error {

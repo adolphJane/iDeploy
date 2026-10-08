@@ -355,42 +355,46 @@ type DeploymentVersionSuggestionView struct {
 }
 
 type DeploymentReleaseView struct {
-	ArtifactPinned bool   `json:"artifactPinned"`
-	ID             string `json:"id"`
-	DeploymentID   string `json:"deploymentId"`
-	RegistryID     string `json:"registryId"`
-	JobID          string `json:"jobId"`
-	Action         string `json:"action"`
-	Version        string `json:"version"`
-	ImageRef       string `json:"imageRef"`
-	SourceRevision string `json:"sourceRevision"`
-	RollbackToID   string `json:"rollbackToId"`
-	Status         string `json:"status"`
-	Detail         string `json:"detail"`
-	CreatedAt      string `json:"createdAt"`
-	FinishedAt     string `json:"finishedAt"`
+	ArtifactPinned      bool   `json:"artifactPinned"`
+	ID                  string `json:"id"`
+	DeploymentID        string `json:"deploymentId"`
+	RegistryID          string `json:"registryId"`
+	JobID               string `json:"jobId"`
+	Action              string `json:"action"`
+	Version             string `json:"version"`
+	ImageRef            string `json:"imageRef"`
+	SourceRevision      string `json:"sourceRevision"`
+	RollbackToID        string `json:"rollbackToId"`
+	Status              string `json:"status"`
+	Detail              string `json:"detail"`
+	EnvironmentRevision int64  `json:"environmentRevision"`
+	CreatedAt           string `json:"createdAt"`
+	FinishedAt          string `json:"finishedAt"`
 }
 
 // DeploymentView binds a local project to a remote server. Runtime state is
 // deliberately not persisted here: the desktop queries Docker when rendering
 // the deployment page so an old local record is never presented as live.
 type DeploymentView struct {
-	WorkloadKind    string   `json:"workloadKind"`
-	WorkloadName    string   `json:"workloadName"`
-	ID              string   `json:"id"`
-	ProjectID       string   `json:"projectId"`
-	ProjectName     string   `json:"projectName"`
-	ProjectStatus   string   `json:"projectStatus"`
-	ImageRepository string   `json:"imageRepository"`
-	ComposePath     string   `json:"composePath"`
-	ServerID        string   `json:"serverId"`
-	ServerName      string   `json:"serverName"`
-	ServerStatus    string   `json:"serverStatus"`
-	DesiredState    string   `json:"desiredState"`
-	ContainerPorts  []string `json:"containerPorts"`
-	RestartPolicy   string   `json:"restartPolicy"`
-	CreatedAt       string   `json:"createdAt"`
-	UpdatedAt       string   `json:"updatedAt"`
+	WorkloadKind               string   `json:"workloadKind"`
+	WorkloadName               string   `json:"workloadName"`
+	ID                         string   `json:"id"`
+	ProjectID                  string   `json:"projectId"`
+	ProjectName                string   `json:"projectName"`
+	ProjectStatus              string   `json:"projectStatus"`
+	ImageRepository            string   `json:"imageRepository"`
+	ComposePath                string   `json:"composePath"`
+	ServerID                   string   `json:"serverId"`
+	ServerName                 string   `json:"serverName"`
+	ServerStatus               string   `json:"serverStatus"`
+	DesiredState               string   `json:"desiredState"`
+	ContainerPorts             []string `json:"containerPorts"`
+	RestartPolicy              string   `json:"restartPolicy"`
+	EnvironmentRevision        int64    `json:"environmentRevision"`
+	AppliedEnvironmentRevision int64    `json:"appliedEnvironmentRevision"`
+	EnvironmentPendingApply    bool     `json:"environmentPendingApply"`
+	CreatedAt                  string   `json:"createdAt"`
+	UpdatedAt                  string   `json:"updatedAt"`
 }
 
 // SystemService owns Phase 0 application infrastructure and exposes a narrow,
@@ -1131,7 +1135,19 @@ func (s *SystemService) DeleteProject(id string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	return projects.Delete(ctx, id)
+	deployments, err := s.deploymentStore()
+	if err != nil {
+		return err
+	}
+	refs, err := deployments.ProjectEnvironmentCredentialRefs(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := projects.Delete(ctx, id); err != nil {
+		return err
+	}
+	cleanupEnvironmentSecrets(ctx, refs)
+	return nil
 }
 
 func (s *SystemService) ChooseProjectDirectory() (string, error) {
@@ -1220,7 +1236,15 @@ func (s *SystemService) DeleteDeployment(id string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	return deployments.Delete(ctx, id)
+	refs, err := deployments.EnvironmentCredentialRefs(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := deployments.Delete(ctx, id); err != nil {
+		return err
+	}
+	cleanupEnvironmentSecrets(ctx, refs)
+	return nil
 }
 
 func (s *SystemService) ListServers() ([]ServerView, error) {
@@ -1595,6 +1619,14 @@ func (s *SystemService) DeleteServer(id string) error {
 	if err != nil {
 		return err
 	}
+	deployments, err := s.deploymentStore()
+	if err != nil {
+		return err
+	}
+	environmentRefs, err := deployments.ServerEnvironmentCredentialRefs(ctx, id)
+	if err != nil {
+		return err
+	}
 	if err := servers.Delete(ctx, id); err != nil {
 		return err
 	}
@@ -1603,6 +1635,7 @@ func (s *SystemService) DeleteServer(id string) error {
 	if connection.CredentialRef != "" {
 		_ = server.DeletePassword(ctx, connection.CredentialRef)
 	}
+	cleanupEnvironmentSecrets(ctx, environmentRefs)
 	return nil
 }
 
@@ -1646,6 +1679,14 @@ func (s *SystemService) ClearServerData() (CleanupView, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	deployments, err := s.deploymentStore()
+	if err != nil {
+		return CleanupView{}, err
+	}
+	environmentRefs, err := deployments.AllEnvironmentCredentialRefs(ctx)
+	if err != nil {
+		return CleanupView{}, err
+	}
 	cleared, err := servers.ClearAll(ctx)
 	if err != nil {
 		return CleanupView{}, err
@@ -1653,6 +1694,11 @@ func (s *SystemService) ClearServerData() (CleanupView, error) {
 	credentialErrors := int64(0)
 	for _, ref := range cleared.CredentialRefs {
 		if err := server.DeletePassword(ctx, ref); err != nil {
+			credentialErrors++
+		}
+	}
+	for _, ref := range environmentRefs {
+		if err := deployment.DeleteEnvironmentSecret(ctx, ref); err != nil {
 			credentialErrors++
 		}
 	}
@@ -2365,7 +2411,9 @@ func deploymentViewFor(ctx context.Context, projects *project.Store, servers *se
 		ComposePath: workspaceProject.ComposePath, ServerID: remoteServer.ID, ServerName: remoteServer.Name,
 		ServerStatus: string(remoteServer.Status), DesiredState: string(target.DesiredState),
 		ContainerPorts: target.ContainerPorts, RestartPolicy: target.RestartPolicy,
-		CreatedAt: target.CreatedAt.Format(time.RFC3339), UpdatedAt: target.UpdatedAt.Format(time.RFC3339),
+		EnvironmentRevision: target.EnvironmentRevision, AppliedEnvironmentRevision: target.AppliedEnvironmentRevision,
+		EnvironmentPendingApply: target.EnvironmentRevision != target.AppliedEnvironmentRevision,
+		CreatedAt:               target.CreatedAt.Format(time.RFC3339), UpdatedAt: target.UpdatedAt.Format(time.RFC3339),
 	}, nil
 }
 
@@ -2380,6 +2428,7 @@ func toDeploymentReleaseView(value deployment.Release) DeploymentReleaseView {
 		Action: value.Action, Version: value.Version, ImageRef: value.ImageRef,
 		SourceRevision: value.SourceRevision, RollbackToID: value.RollbackToID,
 		Status: string(value.Status), Detail: value.Detail,
-		CreatedAt: value.CreatedAt.Format(time.RFC3339), FinishedAt: finishedAt,
+		EnvironmentRevision: value.EnvironmentRevision,
+		CreatedAt:           value.CreatedAt.Format(time.RFC3339), FinishedAt: finishedAt,
 	}
 }

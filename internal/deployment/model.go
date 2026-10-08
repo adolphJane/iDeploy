@@ -18,16 +18,18 @@ const (
 )
 
 type Target struct {
-	WorkloadKind   string
-	WorkloadName   string
-	ID             string
-	ProjectID      string
-	ServerID       string
-	DesiredState   DesiredState
-	ContainerPorts []string
-	RestartPolicy  string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	WorkloadKind               string
+	WorkloadName               string
+	ID                         string
+	ProjectID                  string
+	ServerID                   string
+	DesiredState               DesiredState
+	ContainerPorts             []string
+	RestartPolicy              string
+	EnvironmentRevision        int64
+	AppliedEnvironmentRevision int64
+	CreatedAt                  time.Time
+	UpdatedAt                  time.Time
 }
 
 type Input struct {
@@ -55,21 +57,58 @@ const (
 )
 
 type Release struct {
-	ID             string
-	DeploymentID   string
-	RegistryID     string
-	JobID          string
-	Action         string
-	Version        string
-	ImageRef       string
-	SourceRevision string
-	Manifest       string
-	RollbackToID   string
-	Status         ReleaseStatus
-	Detail         string
-	CreatedAt      time.Time
-	FinishedAt     *time.Time
+	ID                  string
+	DeploymentID        string
+	RegistryID          string
+	JobID               string
+	Action              string
+	Version             string
+	ImageRef            string
+	SourceRevision      string
+	Manifest            string
+	RollbackToID        string
+	Status              ReleaseStatus
+	Detail              string
+	EnvironmentRevision int64
+	CreatedAt           time.Time
+	FinishedAt          *time.Time
 }
+
+const (
+	EnvironmentKindPlain  = "plain"
+	EnvironmentKindSecret = "secret"
+)
+
+type EnvironmentVariable struct {
+	ID            string
+	DeploymentID  string
+	Name          string
+	Kind          string
+	PlainValue    string
+	CredentialRef string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+type EnvironmentChange struct {
+	ID            string
+	Name          string
+	Kind          string
+	PlainValue    string
+	CredentialRef string
+}
+
+var environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
+
+func ValidateEnvironmentName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if !environmentNamePattern.MatchString(name) {
+		return "", errors.New("环境变量名称必须以字母或下划线开头，且只能包含字母、数字和下划线")
+	}
+	return name, nil
+}
+
+func NewEnvironmentVariableID() (string, error) { return newID() }
 
 type ReleaseInput struct {
 	DeploymentID string

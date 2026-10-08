@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"ideploy/internal/deployment"
 	"ideploy/internal/platform/toolchain"
 	"ideploy/internal/project"
 	"ideploy/internal/registry"
@@ -169,6 +170,32 @@ func (s *SystemService) PreflightDeployment(input DeploymentPreflightInput) (Dep
 				add("base_images", "ok", "所有基础镜像均可读取 manifest")
 			}
 		}
+	}
+
+	if target.WorkloadKind == "container" {
+		environmentVariables, environmentErr := deployments.ListEnvironment(ctx, target.ID)
+		if environmentErr != nil {
+			add("environment", "failed", environmentErr.Error())
+		} else {
+			missing := make([]string, 0)
+			for _, variable := range environmentVariables {
+				if variable.Kind != deployment.EnvironmentKindSecret {
+					continue
+				}
+				if _, secretErr := deployment.LoadEnvironmentSecret(ctx, variable.CredentialRef); secretErr != nil {
+					missing = append(missing, variable.Name)
+				}
+			}
+			if len(missing) > 0 {
+				add("environment", "failed", "以下秘密变量未配置或不可用: "+strings.Join(missing, "、"))
+			} else if len(environmentVariables) == 0 {
+				add("environment", "warning", "尚未配置运行环境变量；如应用依赖数据库，请先补充")
+			} else {
+				add("environment", "ok", fmt.Sprintf("%d 个运行环境变量可用，配置版本 %d", len(environmentVariables), target.EnvironmentRevision))
+			}
+		}
+	} else {
+		add("environment", "warning", "当前版本暂未管理 Compose 环境变量")
 	}
 
 	remote := server.NewRemote()

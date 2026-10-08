@@ -223,13 +223,20 @@ func (s *Store) CreateRelease(ctx context.Context, input ReleaseInput) (Release,
 	if input.RollbackToID != "" {
 		rollbackToID = input.RollbackToID
 	}
+	var environmentRevision int64
+	if err := tx.QueryRowContext(ctx, "SELECT environment_revision FROM deployment_targets WHERE id=?", input.DeploymentID).Scan(&environmentRevision); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Release{}, ErrNotFound
+		}
+		return Release{}, err
+	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO deployment_releases(
 			id, deployment_id, registry_id, action, version, image_ref, manifest,
-			rollback_to_id, status, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			rollback_to_id, status, environment_revision, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, id, input.DeploymentID, registryID, input.Action, input.Version, input.ImageRef,
-		input.Manifest, rollbackToID, ReleaseQueued, now)
+		input.Manifest, rollbackToID, ReleaseQueued, environmentRevision, now)
 	if err != nil {
 		return Release{}, fmt.Errorf("create deployment release: %w", err)
 	}
@@ -316,6 +323,17 @@ func (s *Store) ListReleases(ctx context.Context, deploymentID string, limit int
 	return result, rows.Err()
 }
 
+func (s *Store) LatestSucceededRelease(ctx context.Context, deploymentID string) (Release, error) {
+	value, err := scanRelease(s.db.QueryRowContext(ctx, releaseSelect+" WHERE deployment_id=? AND status='succeeded' ORDER BY created_at DESC,rowid DESC LIMIT 1", deploymentID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Release{}, ErrNotFound
+	}
+	if err != nil {
+		return Release{}, fmt.Errorf("get latest successful release: %w", err)
+	}
+	return value, nil
+}
+
 func (s *Store) RecoverInterruptedReleases(ctx context.Context) (int64, error) {
 	now := formatTime(time.Now())
 	result, err := s.db.ExecContext(ctx, `
@@ -346,7 +364,7 @@ func validReleaseStatus(status ReleaseStatus) bool {
 const releaseSelect = `
 	SELECT id, deployment_id, COALESCE(registry_id,''), COALESCE(job_id,''), action,
 		version, image_ref, source_revision, manifest, COALESCE(rollback_to_id,''),
-		status, detail, created_at, finished_at
+		status, detail, environment_revision, created_at, finished_at
 	FROM deployment_releases
 `
 
@@ -356,7 +374,7 @@ func scanRelease(row scanner) (Release, error) {
 	var finishedAt sql.NullString
 	if err := row.Scan(&value.ID, &value.DeploymentID, &value.RegistryID, &value.JobID,
 		&value.Action, &value.Version, &value.ImageRef, &value.SourceRevision, &value.Manifest,
-		&value.RollbackToID, &status, &value.Detail, &createdAt, &finishedAt); err != nil {
+		&value.RollbackToID, &status, &value.Detail, &value.EnvironmentRevision, &createdAt, &finishedAt); err != nil {
 		return Release{}, err
 	}
 	value.Status = ReleaseStatus(status)
@@ -376,7 +394,7 @@ func scanRelease(row scanner) (Release, error) {
 
 const targetSelect = `
 	SELECT id, project_id, server_id, desired_state, created_at, updated_at, workload_kind, workload_name,
-		container_ports_json, restart_policy
+		container_ports_json, restart_policy, environment_revision, applied_environment_revision
 	FROM deployment_targets
 `
 
@@ -386,7 +404,7 @@ func scanTarget(row scanner) (Target, error) {
 	var value Target
 	var portsJSON string
 	var desiredState, createdAt, updatedAt string
-	if err := row.Scan(&value.ID, &value.ProjectID, &value.ServerID, &desiredState, &createdAt, &updatedAt, &value.WorkloadKind, &value.WorkloadName, &portsJSON, &value.RestartPolicy); err != nil {
+	if err := row.Scan(&value.ID, &value.ProjectID, &value.ServerID, &desiredState, &createdAt, &updatedAt, &value.WorkloadKind, &value.WorkloadName, &portsJSON, &value.RestartPolicy, &value.EnvironmentRevision, &value.AppliedEnvironmentRevision); err != nil {
 		return Target{}, err
 	}
 	value.DesiredState = DesiredState(desiredState)

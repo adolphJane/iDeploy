@@ -290,11 +290,16 @@ type DeploymentView = {
   desiredState: 'running' | 'stopped'
   containerPorts: string[]
   restartPolicy: string
+  environmentRevision: number
+  appliedEnvironmentRevision: number
+  environmentPendingApply: boolean
   createdAt: string
   updatedAt: string
 }
 
 type DeploymentInput = { projectId: string; serverId: string; workloadKind: string; workloadName: string; containerPorts: string[]; restartPolicy: string }
+type DeploymentEnvironmentRow = { name: string; kind: 'plain' | 'secret'; value: string; configured: boolean }
+type DeploymentEnvironmentView = { deploymentId: string; revision: number; appliedRevision: number; pendingApply: boolean; variables: DeploymentEnvironmentRow[] }
 type DeploymentPreflightAction = 'project' | 'dockerfile' | 'image' | 'workload' | 'server' | 'registry' | 'docker' | 'settings'
 type DeploymentPreflightCheck = {
   id: string
@@ -521,6 +526,8 @@ const deploymentSearch = ref('')
 const deploymentContainers = ref<Record<string, RemoteContainersView>>({})
 const deploymentForm = reactive<DeploymentInput>({ projectId: '', serverId: '', workloadKind: 'container', workloadName: '', containerPorts: [], restartPolicy: 'unless-stopped' })
 const deploymentPortsText = ref('')
+const deploymentEnvironmentRows = ref<DeploymentEnvironmentRow[]>([])
+const deploymentEnvironmentOriginalNames = ref<string[]>([])
 const editingDeploymentID = ref('')
 const deploymentFormError = ref('')
 const releaseDialogOpen = ref(false)
@@ -1312,7 +1319,7 @@ async function refreshDeploymentsWithFeedback() {
   }
 }
 
-function openDeploymentDialog(target?: DeploymentView) {
+async function openDeploymentDialog(target?: DeploymentView) {
   deploymentError.value = ''
   deploymentFormError.value = ''
   editingDeploymentID.value = target?.id ?? ''
@@ -1323,7 +1330,27 @@ function openDeploymentDialog(target?: DeploymentView) {
   deploymentForm.containerPorts = target?.containerPorts ?? []
   deploymentForm.restartPolicy = target?.restartPolicy || 'unless-stopped'
   deploymentPortsText.value = deploymentForm.containerPorts.join('\n')
+  deploymentEnvironmentRows.value = []
+  deploymentEnvironmentOriginalNames.value = []
   deploymentDialogOpen.value = true
+  if (target?.id && target.workloadKind === 'container') {
+    try {
+      const environment = await SystemService.ListDeploymentEnvironment(target.id) as unknown as DeploymentEnvironmentView
+      if (editingDeploymentID.value !== target.id) return
+      deploymentEnvironmentRows.value = environment.variables.map(variable => ({ ...variable, value: variable.kind === 'secret' ? '' : variable.value }))
+      deploymentEnvironmentOriginalNames.value = environment.variables.map(variable => variable.name)
+    } catch (error) {
+      deploymentFormError.value = friendlyError(error)
+    }
+  }
+}
+
+function addDeploymentEnvironmentVariable(kind: 'plain' | 'secret' = 'plain') {
+  deploymentEnvironmentRows.value.push({ name: '', kind, value: '', configured: false })
+}
+
+function removeDeploymentEnvironmentVariable(index: number) {
+  deploymentEnvironmentRows.value.splice(index, 1)
 }
 
 function closeDeploymentDialog() {
@@ -1347,6 +1374,16 @@ async function createDeployment() {
       const created = await SystemService.CreateDeployment({ ...deploymentForm }) as unknown as DeploymentView
       upsertDeployment(created)
       savedDeployment = created
+    }
+    if (savedDeployment && deploymentForm.workloadKind === 'container') {
+      const currentNames = deploymentEnvironmentRows.value.map(variable => variable.name.trim()).filter(Boolean)
+      await SystemService.UpdateDeploymentEnvironment({
+        deploymentId: savedDeployment.id,
+        variables: deploymentEnvironmentRows.value.map(variable => ({ name: variable.name.trim(), kind: variable.kind, value: variable.value })),
+        remove: deploymentEnvironmentOriginalNames.value.filter(name => !currentNames.includes(name)),
+      })
+      await loadDeployments()
+      savedDeployment = deployments.value.find(value => value.id === savedDeployment?.id) ?? savedDeployment
     }
     deploymentDialogOpen.value = false
     await refreshDeploymentRuntimes()
@@ -2805,7 +2842,7 @@ watch(activeSection, (section) => {
             <article v-for="runtime in filteredDeployments" :key="runtime.deployment.id" class="deployment-row" :class="runtime.status">
               <div class="deployment-mark">{{ runtime.deployment.projectName.slice(0, 1).toUpperCase() }}</div>
               <div class="deployment-main">
-                <div class="deployment-title"><button class="deployment-title-button" @click="toggleDeploymentDetails(runtime.deployment.id)">{{ runtime.deployment.projectName }}</button><span class="deployment-status" :class="runtime.status">{{ busyServer(runtime.deployment.serverId) ? '操作中' : deploymentStatusLabel[runtime.status] }}</span></div>
+                <div class="deployment-title"><button class="deployment-title-button" @click="toggleDeploymentDetails(runtime.deployment.id)">{{ runtime.deployment.projectName }}</button><span class="deployment-status" :class="runtime.status">{{ busyServer(runtime.deployment.serverId) ? '操作中' : deploymentStatusLabel[runtime.status] }}</span><span v-if="runtime.deployment.environmentPendingApply" class="deployment-config-pending">运行配置待应用</span></div>
                 <code>{{ runtime.deployment.workloadKind === 'compose' ? 'Compose' : '容器' }} · {{ runtime.deployment.workloadName || '尚未绑定' }}</code>
                 <small>{{ runtime.deployment.serverName }} · {{ runtime.detail }}</small>
                 <div class="deployment-version-summary"><span>当前版本</span><strong>{{ deploymentCurrentVersions[runtime.deployment.id] || '读取中…' }}</strong><small>最近成功发布</small></div>
@@ -3403,8 +3440,19 @@ watch(activeSection, (section) => {
           <template v-if="deploymentForm.workloadKind === 'container'">
             <label class="form-field"><span>端口映射（可选）</span><textarea v-model.trim="deploymentPortsText" rows="3" placeholder="8080&#10;127.0.0.1:5432:5432"></textarea><small>每行一条。只填外部端口（如 8080）时，发布会读取 Dockerfile 的 EXPOSE 自动匹配内部端口；也可填写完整的“外部端口:内部端口”。</small></label>
             <label class="form-field"><span>容器重启策略</span><select v-model="deploymentForm.restartPolicy"><option value="unless-stopped">unless-stopped</option><option value="always">always</option><option value="on-failure">on-failure</option><option value="no">no</option></select></label>
+            <section class="deployment-environment-editor">
+              <div class="deployment-environment-heading"><div><strong>运行环境变量</strong><small>发布或重启时注入容器；秘密只保存在系统钥匙串。</small></div><button type="button" class="text-button" @click="addDeploymentEnvironmentVariable()">添加变量</button></div>
+              <div v-if="!deploymentEnvironmentRows.length" class="deployment-environment-empty">尚未配置。数据库、Redis、令牌等运行配置可以在这里添加。</div>
+              <div v-for="(variable, index) in deploymentEnvironmentRows" :key="index" class="deployment-environment-row">
+                <input v-model.trim="variable.name" maxlength="128" autocomplete="off" placeholder="DATABASE_HOST" aria-label="环境变量名称">
+                <select v-model="variable.kind" aria-label="环境变量类型"><option value="plain">普通</option><option value="secret">秘密</option></select>
+                <input v-if="variable.kind === 'secret'" v-model="variable.value" type="password" autocomplete="new-password" :placeholder="variable.configured ? '已配置，留空保持不变' : '填写秘密值'" aria-label="秘密值">
+                <input v-else v-model="variable.value" autocomplete="off" placeholder="变量值" aria-label="环境变量值">
+                <button type="button" class="text-button danger-text" @click="removeDeploymentEnvironmentVariable(index)">删除</button>
+              </div>
+            </section>
           </template>
-          <div class="dialog-security-note">保存后可从部署列表发起发布。单容器模式会替换同名容器；Compose 模式会上传当前 Compose 快照并执行 pull / up。</div>
+          <div class="dialog-security-note">保存后可从部署列表发起发布。单容器发布与重启都会重新创建容器并注入当前运行配置；秘密不会写入项目、镜像或查询结果。</div>
           <div class="dialog-actions"><button type="button" class="secondary-button" :disabled="deploymentSaving" @click="closeDeploymentDialog">取消</button><button type="submit" class="primary-button" :disabled="deploymentSaving || !deploymentForm.projectId || !deploymentForm.serverId || !deploymentForm.workloadName">{{ deploymentSaving ? '正在保存' : '保存部署配置' }}</button></div>
         </form>
       </div>

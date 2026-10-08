@@ -42,6 +42,7 @@ codex mcp list
 - `list_servers`
 - `list_remote_containers`
 - `inspect_deployment_runtime`
+- `list_deployment_environment`
 - `get_container_logs`
 - `check_port_availability`
 - `list_registries`
@@ -62,6 +63,8 @@ codex mcp list
 - `validate_project`
 - `create_deployment`
 - `update_deployment`
+- `update_deployment_environment`
+- `request_deployment_secret_input`
 - `clone_deployment`
 - `configure_build_proxy`
 
@@ -80,7 +83,7 @@ codex mcp list
 - `delete_project`
 - `delete_deployment`
 
-远程变更工具带有 MCP destructive/open-world 标记，并在说明中要求 AI 仅在用户明确要求具体操作后调用；创建和更新配置标记为非破坏性的本地写入。删除工具只删除 iDeploy 本地配置，但仍要求 `confirm=true`。Registry、SSH 和 Keychain 凭据不会作为工具参数或结果返回。
+远程变更工具带有 MCP destructive/open-world 标记，并在说明中要求 AI 仅在用户明确要求具体操作后调用；创建和更新配置标记为非破坏性的本地写入。删除工具只删除 iDeploy 本地配置，但仍要求 `confirm=true`。Registry、SSH 和 Keychain 凭据不会作为工具参数或结果返回。`list_deployment_environment` 会返回普通变量值；秘密变量仅返回名称、类型和 `configured` 状态。MCP 不接受原始部署秘密；`request_deployment_secret_input` 会在本机打开隐藏输入框并直接保存到 macOS Keychain。
 
 配置写入可提供调用方生成的 `request_id`（8 到 128 个安全字符）。同一个请求不确定是否完成时，必须复用原 `request_id`，不能生成新 ID；iDeploy 会返回已保存的首次结果。收到 `operation_pending` 或本地控制连接超时后，调用 `get_operation` 查询最终状态。
 
@@ -91,13 +94,27 @@ MCP 客户端可以按以下顺序完成新项目的接入和发布：
 1. 调用 `list_servers` 和 `list_registries`，让用户选择已有的目标服务器与镜像仓库。
 2. 收集项目来源和构建配置，调用 `create_project`。本地项目使用 `source_kind=local` 并提供 iDeploy 所在机器可访问的绝对路径；Git 项目使用 `source_kind=git` 并提供仓库地址、引用类型和引用值。
 3. 使用返回的项目 ID、服务器 ID、工作负载类型与名称调用 `create_deployment`。
-4. 使用返回的部署 ID 和仓库 ID 调用 `publish_deployment`。
+4. 如有需要，使用 `update_deployment_environment` 配置普通运行变量；数据库密码、令牌等秘密使用 `request_deployment_secret_input` 让用户在本机隐藏输入框中填写。
+5. 使用返回的部署 ID 和仓库 ID 调用 `publish_deployment`。
 
 发布前建议调用 `preflight_deployment`。它会检查项目文件、基础镜像 manifest、构建代理、仓库凭据、SSH/Docker、目标架构、容器名称和远程端口占用，并在端口冲突时返回候选端口。`publish_deployment` 也会在开始构建前再次阻止已知的主机端口冲突。修改现有配置时使用 `update_project` 或 `update_deployment`，未提供的字段保持不变；`validate_project` 可重新扫描本地项目构建文件，`clone_deployment` 可继承现有配置并为另一服务器/工作负载创建无发布历史的新部署。
 
 失败或取消的发布可用 `retry_release` 按原版本重试：构建或推送前失败时会重新构建；已经记录不可变镜像 Digest 或 Compose 快照时，会直接复用该制品继续拉取与远程部署，不重新构建，也不覆盖同一 Tag。成功版本仍不可覆盖。
 
+CLI 提供对应的单容器运行配置命令：
+
+```bash
+ideploy deployment env list <deployment-id>
+ideploy deployment env set <deployment-id> DB_MODE=mysql DATABASE_PORT=3306
+ideploy deployment env remove <deployment-id> OLD_VARIABLE
+ideploy deployment env set-secret <deployment-id> DATABASE_PASSWORD
+```
+
+`set-secret` 会打开本机隐藏输入框，秘密不会出现在命令行参数或终端历史中。
+
 普通容器发布在服务器上始终先按不可变 Digest 拉取和校验制品，然后创建仅存在于服务器本地的 `repository:version` 标签，并使用该标签启动容器。这样发布记录和回滚仍由 Digest 保证确定性，而 `docker ps` 的 IMAGE 列会显示可读的仓库与版本。容器同时记录 `com.ideploy.pinned-image`、`com.ideploy.version` 和 `com.ideploy.release-id` 标签；本地版本标签不会被推送回 Registry。Compose 仍使用锁定 Digest 的 Compose 快照。
+
+单容器运行变量在发布或 `restart_deployment` 时通过 SSH 标准输入写入权限为 `0600` 的远程临时 env 文件，并由 `docker run --env-file` 注入；容器创建完成后立即删除临时文件。单容器重启是受控重建，健康检查失败会恢复原容器。Compose 环境变量暂不由此能力管理。
 
 单容器发布需要项目具有 `dockerfile_path` 和不含 Tag/Digest 的 `image_repository`；本地项目未显式填写 Dockerfile 时会尝试自动检测。Compose 发布需要 `compose_path`，且 Compose 的 `image` 配置应使用 `${IMAGE_TAG}`。构建上下文、Dockerfile 和 Compose 文件路径均相对于项目根目录。
 
