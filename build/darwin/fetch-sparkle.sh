@@ -12,7 +12,7 @@ if [[ ! -f "$archive" ]] || ! printf '%s  %s\n' "$sha256" "$archive" | shasum -a
   curl --http1.1 --fail --location --retry 3 --max-time 180 --silent --show-error \
     "https://github.com/sparkle-project/Sparkle/releases/download/$version/Sparkle-$version.tar.xz" \
     --output "$archive"
-  printf '%s  %s\n' "$sha256" "$archive" | shasum -a 256 --check
+  printf '%s  %s\n' "$sha256" "$archive" | shasum -a 256 --check >/dev/null
   extract=true
 fi
 if [[ "$extract" == true || ! -d "$cache/Sparkle.framework" || ! -x "$cache/bin/generate_appcast" || ! -x "$cache/bin/generate_keys" ]]; then
