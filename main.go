@@ -91,6 +91,9 @@ func runDesktop() {
 	app.Event.OnApplicationEvent(events.Mac.ApplicationShouldHandleReopen, func(_ *application.ApplicationEvent) {
 		window.Show()
 	})
+	app.Event.OnApplicationEvent(events.Mac.ApplicationDidFinishLaunching, func(_ *application.ApplicationEvent) {
+		startAppUpdater()
+	})
 
 	tray := app.SystemTray.New()
 	if runtime.GOOS == "darwin" {

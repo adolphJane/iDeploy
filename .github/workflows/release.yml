@@ -45,6 +45,7 @@ jobs:
       - name: Package and verify Universal app
         env:
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          SPARKLE_ED25519_PRIVATE_KEY: ${{ secrets.SPARKLE_ED25519_PRIVATE_KEY }}
         run: bash build/darwin/release.sh "$RELEASE_TAG"
       - uses: actions/upload-artifact@v4
         with:
