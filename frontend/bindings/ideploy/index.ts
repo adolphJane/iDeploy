@@ -8,6 +8,7 @@ export {
 
 export type {
     AISettingsView,
+    AppUpdateStatus,
     BuildProxyRule,
     BuildProxySettingsInput,
     BuildProxySettingsView,
@@ -46,6 +47,7 @@ export type {
     DockerfileSaveInput,
     HostKeyView,
     JobView,
+    LaunchAtLoginStatus,
     Overview,
     PortAvailabilityInput,
     PortAvailabilityItemView,

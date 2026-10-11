@@ -27,6 +27,10 @@ export function CancelJob(id: string): $CancellablePromise<void> {
     return $Call.ByID(87326605, id);
 }
 
+export function CheckForAppUpdates(): $CancellablePromise<void> {
+    return $Call.ByID(4032869032);
+}
+
 export function CheckPortAvailability(input: $models.PortAvailabilityInput): $CancellablePromise<$models.PortAvailabilityView> {
     return $Call.ByID(2783371588, input);
 }
@@ -129,6 +133,10 @@ export function GetAISettings(): $CancellablePromise<$models.AISettingsView> {
     return $Call.ByID(2968732991);
 }
 
+export function GetAppUpdateStatus(): $CancellablePromise<$models.AppUpdateStatus> {
+    return $Call.ByID(1865720224);
+}
+
 export function GetBuildProxySettings(): $CancellablePromise<$models.BuildProxySettingsView> {
     return $Call.ByID(1569951585);
 }
@@ -163,6 +171,10 @@ export function GetDatabaseTableRows(id: string, schema: string, table: string, 
 
 export function GetJob(id: string): $CancellablePromise<$models.JobView> {
     return $Call.ByID(1308345887, id);
+}
+
+export function GetLaunchAtLoginStatus(): $CancellablePromise<$models.LaunchAtLoginStatus> {
+    return $Call.ByID(2028640865);
 }
 
 export function GetOverview(): $CancellablePromise<$models.Overview> {
@@ -307,6 +319,10 @@ export function SaveDeepSeekAPIKey(key: string): $CancellablePromise<void> {
 
 export function SaveGeneratedDockerfile(input: $models.DockerfileSaveInput): $CancellablePromise<$models.ProjectView> {
     return $Call.ByID(587226264, input);
+}
+
+export function SetLaunchAtLogin(enabled: boolean): $CancellablePromise<$models.LaunchAtLoginStatus> {
+    return $Call.ByID(3600067299, enabled);
 }
 
 export function TestDatabaseConnection(input: $models.DatabaseConnectionInput): $CancellablePromise<void> {

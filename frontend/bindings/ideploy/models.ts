@@ -5,6 +5,15 @@ export interface AISettingsView {
     "deepSeekConfigured": boolean;
 }
 
+export interface AppUpdateStatus {
+    "currentVersion": string;
+    "latestVersion": string;
+    "updateAvailable": boolean;
+    "releaseURL": string;
+    "publishedAt": string;
+    "checkedAt": string;
+}
+
 export interface BuildProxyRule {
     "upstream": string;
     "mirror": string;
@@ -327,6 +336,13 @@ export interface JobView {
     "attempt": number;
     "createdAt": string;
     "updatedAt": string;
+}
+
+export interface LaunchAtLoginStatus {
+    "enabled": boolean;
+    "requiresApproval": boolean;
+    "available": boolean;
+    "detail": string;
 }
 
 export interface Overview {

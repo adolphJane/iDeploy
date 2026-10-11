@@ -6,6 +6,7 @@
 @interface IDSparkleUpdater : NSObject
 - (BOOL)automaticallyChecksForUpdates;
 - (void)checkForUpdatesInBackground;
+- (void)checkForUpdates:(id)sender;
 @end
 
 @interface IDSparkleController : NSObject
@@ -48,6 +49,17 @@ void ideploy_start_app_updater(void) {
             // check immediately when automatic checks are allowed by the user.
             if ([updater automaticallyChecksForUpdates]) {
                 [updater checkForUpdatesInBackground];
+            }
+        }
+    });
+}
+
+void ideploy_check_for_updates(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @autoreleasepool {
+            IDSparkleUpdater *updater = [(IDSparkleController *)ideployUpdaterController updater];
+            if (updater != nil) {
+                [updater checkForUpdates:nil];
             }
         }
     });

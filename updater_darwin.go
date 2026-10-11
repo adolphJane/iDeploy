@@ -5,6 +5,7 @@ package main
 /*
 #cgo LDFLAGS: -framework Foundation
 void ideploy_start_app_updater(void);
+void ideploy_check_for_updates(void);
 */
 import "C"
 
@@ -12,4 +13,13 @@ import "C"
 // builds do not need a downloaded framework to compile or start.
 func startAppUpdater() {
 	C.ideploy_start_app_updater()
+}
+
+func checkForAppUpdates() {
+	C.ideploy_check_for_updates()
+}
+
+func (s *SystemService) CheckForAppUpdates() error {
+	checkForAppUpdates()
+	return nil
 }

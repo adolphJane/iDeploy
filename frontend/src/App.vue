@@ -264,6 +264,8 @@ type BuildProxyMode = 'disabled' | 'preferred' | 'required'
 type BuildProxyRule = { upstream: string; mirror: string }
 type BuildProxySettingsView = { mode: BuildProxyMode; rules: BuildProxyRule[]; configured: boolean; builderName: string; detail: string }
 type CommandLineToolStatus = { installed: boolean; conflict: boolean; commandPath: string; executablePath: string; detail: string }
+type LaunchAtLoginStatus = { enabled: boolean; requiresApproval: boolean; available: boolean; detail: string }
+type AppUpdateStatus = { currentVersion: string; latestVersion: string; updateAvailable: boolean; releaseURL: string; publishedAt: string; checkedAt: string }
 type DockerfileGenerationView = {
   content: string
   technology: string
@@ -592,6 +594,11 @@ const buildProxyRulesText = ref('')
 const buildProxySaving = ref(false)
 const commandLineTool = ref<CommandLineToolStatus | null>(null)
 const commandLineToolInstalling = ref(false)
+const launchAtLogin = ref<LaunchAtLoginStatus | null>(null)
+const launchAtLoginSaving = ref(false)
+const appUpdateStatus = ref<AppUpdateStatus | null>(null)
+const appUpdateLoading = ref(false)
+const appUpdateError = ref('')
 const copiedMCPConfig = ref<'codex' | 'json' | 'verify' | ''>('')
 const mcpCommandPath = computed(() => commandLineTool.value?.commandPath || '/usr/local/bin/ideploy')
 const mcpCodexCommand = computed(() => `codex mcp add ideploy -- ${mcpCommandPath.value} mcp`)
@@ -808,6 +815,59 @@ async function installCommandLineTool() {
     settingsError.value = error instanceof Error ? error.message : String(error)
   } finally {
     commandLineToolInstalling.value = false
+  }
+}
+
+async function loadLaunchAtLoginStatus() {
+  try {
+    launchAtLogin.value = await SystemService.GetLaunchAtLoginStatus() as unknown as LaunchAtLoginStatus
+  } catch (error) {
+    settingsError.value = error instanceof Error ? error.message : String(error)
+  }
+}
+
+async function loadAppUpdateStatus() {
+  if (appUpdateLoading.value) return
+  appUpdateLoading.value = true
+  appUpdateError.value = ''
+  try {
+    appUpdateStatus.value = await SystemService.GetAppUpdateStatus() as unknown as AppUpdateStatus
+  } catch (error) {
+    appUpdateError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    appUpdateLoading.value = false
+  }
+}
+
+async function checkForAppUpdates() {
+  if (appUpdateLoading.value) return
+  appUpdateLoading.value = true
+  appUpdateError.value = ''
+  try {
+    await SystemService.CheckForAppUpdates()
+    appUpdateStatus.value = await SystemService.GetAppUpdateStatus() as unknown as AppUpdateStatus
+    showToast(appUpdateStatus.value.updateAvailable
+      ? `发现新版本 v${appUpdateStatus.value.latestVersion}，更新器已打开。`
+      : `iDeploy v${appUpdateStatus.value.currentVersion} 已是最新版本。`)
+  } catch (error) {
+    appUpdateError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    appUpdateLoading.value = false
+  }
+}
+
+async function toggleLaunchAtLogin() {
+  if (!launchAtLogin.value?.available || launchAtLoginSaving.value) return
+  launchAtLoginSaving.value = true
+  settingsError.value = ''
+  try {
+    launchAtLogin.value = await SystemService.SetLaunchAtLogin(!launchAtLogin.value.enabled) as unknown as LaunchAtLoginStatus
+    showToast(launchAtLogin.value.requiresApproval ? launchAtLogin.value.detail : launchAtLogin.value.enabled ? '已启用登录启动' : '已关闭登录启动')
+  } catch (error) {
+    settingsError.value = error instanceof Error ? error.message : String(error)
+    await loadLaunchAtLoginStatus()
+  } finally {
+    launchAtLoginSaving.value = false
   }
 }
 
@@ -2596,7 +2656,7 @@ watch(activeSection, (section) => {
   if (section === 'databases') void loadDatabaseConnections()
   if (section === 'servers') void loadServers()
   if (section === 'deployments') void refreshDeploymentsWithFeedback()
-  if (section === 'settings') void Promise.all([refresh(), loadServers(), loadDeployments(), loadAISettings(), loadBuildProxySettings(), loadCommandLineToolStatus()])
+  if (section === 'settings') void Promise.all([refresh(), loadServers(), loadDeployments(), loadAISettings(), loadBuildProxySettings(), loadCommandLineToolStatus(), loadLaunchAtLoginStatus(), loadAppUpdateStatus()])
 })
 </script>
 
@@ -3239,6 +3299,26 @@ watch(activeSection, (section) => {
           <article class="registry-summary-card"><span>服务器连接</span><strong>{{ servers.length }}</strong><small>保存在本地数据库中的 SSH 配置</small></article>
           <article class="registry-summary-card"><span>部署关联</span><strong>{{ deployments.length }}</strong><small>项目与服务器之间的运行绑定</small></article>
           <article class="registry-summary-card"><span>活动任务</span><strong>{{ overview?.activeJobs ?? 0 }}</strong><small>有服务器任务执行时禁止清除</small></article>
+        </section>
+
+        <section class="panel settings-panel">
+          <div class="panel-header"><div><span class="section-kicker">APPLICATION</span><h2>应用更新与启动</h2></div><span class="platform-badge">macOS</span></div>
+          <div class="settings-list">
+            <div class="settings-row">
+              <div class="settings-icon">↻</div>
+              <div class="settings-copy"><strong>iDeploy v{{ appUpdateStatus?.currentVersion || overview?.version || '—' }}</strong><span>{{ appUpdateStatus?.updateAvailable ? `发现新版本 v${appUpdateStatus.latestVersion}` : appUpdateStatus ? '当前已是最新正式版' : appUpdateError || '正在检查最新正式版…' }}</span><small>{{ appUpdateStatus ? `最新版本发布于 ${formatShortTime(appUpdateStatus.publishedAt)} · 上次检查 ${formatShortTime(appUpdateStatus.checkedAt)}` : '启动应用时会自动检查 GitHub 最新正式版。发现更新后自动下载并验证，退出应用后安装。' }}</small></div>
+              <button class="secondary-button" :disabled="appUpdateLoading" @click="checkForAppUpdates">{{ appUpdateLoading ? '检查中…' : '检查更新' }}</button>
+            </div>
+            <div class="settings-row">
+              <div class="settings-icon">⇧</div>
+              <div class="settings-copy"><strong>登录后启动</strong><span>{{ launchAtLogin?.detail || '正在检查 macOS 登录项…' }}</span><small>启用后，登录 macOS 时自动启动 iDeploy 并驻留菜单栏。</small></div>
+              <label class="settings-toggle">
+                <input type="checkbox" role="switch" :checked="launchAtLogin?.enabled ?? false" :disabled="launchAtLoginSaving || !launchAtLogin?.available || launchAtLogin?.requiresApproval" aria-label="登录后启动" @change="toggleLaunchAtLogin">
+                <span class="settings-toggle-track" aria-hidden="true"></span>
+                <span class="settings-toggle-label">{{ launchAtLoginSaving ? '设置中…' : launchAtLogin?.requiresApproval ? '等待系统允许' : launchAtLogin?.enabled ? '已开启' : launchAtLogin?.available ? '已关闭' : '仅支持已安装应用' }}</span>
+              </label>
+            </div>
+          </div>
         </section>
 
         <section class="panel settings-panel">
