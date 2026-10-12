@@ -8,6 +8,7 @@ export {
 
 export type {
     AISettingsView,
+    AppUpdateProgress,
     AppUpdateStatus,
     BuildProxyRule,
     BuildProxySettingsInput,

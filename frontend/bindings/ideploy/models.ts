@@ -5,11 +5,21 @@ export interface AISettingsView {
     "deepSeekConfigured": boolean;
 }
 
+export interface AppUpdateProgress {
+    "phase": string;
+    "detail": string;
+    "percent": number;
+    "downloadedBytes": number;
+    "totalBytes": number;
+    "filePath": string;
+}
+
 export interface AppUpdateStatus {
     "currentVersion": string;
     "latestVersion": string;
     "updateAvailable": boolean;
     "releaseURL": string;
+    "downloadURL": string;
     "publishedAt": string;
     "checkedAt": string;
 }

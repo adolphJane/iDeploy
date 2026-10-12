@@ -23,7 +23,8 @@ func commandLineToolStatus() (CommandLineToolStatus, error) {
 		return CommandLineToolStatus{}, fmt.Errorf("resolve iDeploy executable links: %w", err)
 	}
 	status := CommandLineToolStatus{CommandPath: commandLineToolPath, ExecutablePath: executable}
-	if !strings.HasSuffix(filepath.ToSlash(executable), "/iDeploy.app/Contents/MacOS/iDeploy") {
+	if !strings.HasSuffix(filepath.ToSlash(executable), "/iDeploy.app/Contents/MacOS/iDeployBackend") &&
+		!strings.HasSuffix(filepath.ToSlash(executable), "/iDeploy.app/Contents/MacOS/iDeploy") {
 		status.Detail = "请先将 iDeploy.app 安装到本机，再安装终端命令"
 		return status, nil
 	}
@@ -53,7 +54,8 @@ func commandLineToolStatus() (CommandLineToolStatus, error) {
 		status.Detail = "终端命令已安装"
 		return status, nil
 	}
-	if strings.HasSuffix(filepath.ToSlash(filepath.Clean(linkTarget)), "/iDeploy.app/Contents/MacOS/iDeploy") {
+	if strings.HasSuffix(filepath.ToSlash(filepath.Clean(linkTarget)), "/iDeploy.app/Contents/MacOS/iDeployBackend") ||
+		strings.HasSuffix(filepath.ToSlash(filepath.Clean(linkTarget)), "/iDeploy.app/Contents/MacOS/iDeploy") {
 		status.Detail = "终端命令指向其他位置，可重新安装以更新"
 		return status, nil
 	}
@@ -70,7 +72,8 @@ func installCommandLineTool() (CommandLineToolStatus, error) {
 	if status.Conflict {
 		return status, errors.New(status.Detail)
 	}
-	if !strings.HasSuffix(filepath.ToSlash(status.ExecutablePath), "/iDeploy.app/Contents/MacOS/iDeploy") {
+	if !strings.HasSuffix(filepath.ToSlash(status.ExecutablePath), "/iDeploy.app/Contents/MacOS/iDeployBackend") &&
+		!strings.HasSuffix(filepath.ToSlash(status.ExecutablePath), "/iDeploy.app/Contents/MacOS/iDeploy") {
 		return status, errors.New("请从已安装的 iDeploy.app 中安装终端命令")
 	}
 	command := "/bin/mkdir -p /usr/local/bin && /bin/ln -sfn " + shellSingleQuote(status.ExecutablePath) + " " + shellSingleQuote(commandLineToolPath)

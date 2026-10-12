@@ -19,14 +19,21 @@ type AppUpdateStatus struct {
 	LatestVersion   string `json:"latestVersion"`
 	UpdateAvailable bool   `json:"updateAvailable"`
 	ReleaseURL      string `json:"releaseURL"`
+	DownloadURL     string `json:"downloadURL"`
 	PublishedAt     string `json:"publishedAt"`
 	CheckedAt       string `json:"checkedAt"`
 }
 
 type githubRelease struct {
-	TagName     string `json:"tag_name"`
-	HTMLURL     string `json:"html_url"`
-	PublishedAt string `json:"published_at"`
+	TagName     string               `json:"tag_name"`
+	HTMLURL     string               `json:"html_url"`
+	PublishedAt string               `json:"published_at"`
+	Assets      []githubReleaseAsset `json:"assets"`
+}
+
+type githubReleaseAsset struct {
+	Name               string `json:"name"`
+	BrowserDownloadURL string `json:"browser_download_url"`
 }
 
 var appVersionPattern = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z.-]+))?$`)
@@ -74,9 +81,21 @@ func (s *SystemService) GetAppUpdateStatus() (AppUpdateStatus, error) {
 		LatestVersion:   latestVersion,
 		UpdateAvailable: comparison > 0,
 		ReleaseURL:      release.HTMLURL,
+		DownloadURL:     releaseDownloadURL(release),
 		PublishedAt:     release.PublishedAt,
 		CheckedAt:       time.Now().UTC().Format(time.RFC3339),
 	}, nil
+}
+
+func releaseDownloadURL(release githubRelease) string {
+	for _, extension := range []string{".dmg", ".zip"} {
+		for _, asset := range release.Assets {
+			if strings.HasPrefix(asset.Name, "iDeploy-") && strings.HasSuffix(strings.ToLower(asset.Name), extension) && strings.HasPrefix(asset.BrowserDownloadURL, "https://github.com/adolphJane/iDeploy/releases/download/") {
+				return asset.BrowserDownloadURL
+			}
+		}
+	}
+	return release.HTMLURL
 }
 
 func parseAppVersion(version string) ([3]int, bool) {

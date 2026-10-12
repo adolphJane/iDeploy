@@ -2,10 +2,12 @@
 
 package main
 
-import "errors"
-
 func startAppUpdater() {}
 
-func (s *SystemService) CheckForAppUpdates() error {
-	return errors.New("应用内检查更新仅支持 macOS")
+func (s *SystemService) CheckForAppUpdates() bool                   { return false }
+func (s *SystemService) GetAutomaticUpdateChecks() bool             { return false }
+func (s *SystemService) SetAutomaticUpdateChecks(enabled bool) bool { return false }
+
+func sparkleUpdateProgress() (AppUpdateProgress, error) {
+	return AppUpdateProgress{Phase: "idle", Percent: -1}, nil
 }

@@ -2,9 +2,11 @@
 
 iDeploy 内置本地 MCP Server，供 Codex 和其他支持 stdio MCP 的本机 AI 客户端查询部署配置、执行发布操作并跟踪任务。MCP Server 与桌面应用和 CLI 复用同一个数据库、macOS Keychain、`SystemService` 与持久化 Job Runner。
 
+桌面应用启动后会自动打开本机控制通道，并在顶部菜单栏驻留。可在「设置 → 终端集成」启用「登录后启动」，使登录 macOS 后发布 Runtime 自动就绪。MCP 协议仍由客户端通过 stdio 启动连接；客户端首次配置一次即可，桌面端无需再手动开启 MCP 开关。
+
 ## 启动方式
 
-MCP Server 编译在 iDeploy 主程序中，不需要安装额外守护进程：
+MCP Server 编译在 iDeploy 的 Go 后台程序中，不需要安装额外守护进程。可使用应用包内的 `iDeploy.app/Contents/MacOS/iDeployBackend` 路径，或安装终端命令后使用：
 
 ```bash
 ideploy mcp

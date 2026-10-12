@@ -20,7 +20,7 @@ if [[ "${GITHUB_ACTIONS:-}" == true && -z "${SPARKLE_ED25519_PRIVATE_KEY:-}" ]];
   exit 1
 fi
 sparkle_cache="$(bash build/darwin/fetch-sparkle.sh)"
-wails3 task darwin:package:universal "APP_VERSION=$version"
+APP_VERSION="$version" bash build/darwin/build-native.sh universal
 app="bin/iDeploy.app"
 framework="$app/Contents/Frameworks/Sparkle.framework"
 mkdir -p "$app/Contents/Frameworks"
@@ -43,31 +43,40 @@ codesign --force --sign - "$framework/Versions/B/Updater.app"
 codesign --force --sign - "$framework"
 codesign --force --sign - "$app"
 codesign --verify --deep --strict --verbose=2 "$app"
-architectures="$(lipo -archs "$app/Contents/MacOS/iDeploy")"
-for architecture in arm64 x86_64; do
-  if [[ " $architectures " != *" $architecture "* ]]; then
-    echo "Missing required architecture: $architecture ($architectures)" >&2
-    exit 1
-  fi
+for executable in iDeployUI iDeployBackend; do
+  architectures="$(lipo -archs "$app/Contents/MacOS/$executable")"
+  for architecture in arm64 x86_64; do
+    if [[ " $architectures " != *" $architecture "* ]]; then
+      echo "Missing required architecture: $architecture ($executable: $architectures)" >&2
+      exit 1
+    fi
+  done
 done
 mkdir -p bin/release
 archive="iDeploy-${tag}-macos-universal.zip"
 ditto -c -k --sequesterRsrc --keepParent "$app" "bin/release/$archive"
-(cd bin/release && shasum -a 256 "$archive" > SHA256SUMS.txt)
+disk_image="iDeploy-${tag}-macos-universal.dmg"
 stage="$(mktemp -d)"
-trap 'rm -rf "$stage"' EXIT
-cp "bin/release/$archive" "$stage/"
+appcast_stage="$(mktemp -d)"
+trap 'rm -rf "$stage" "$appcast_stage"' EXIT
+ditto "$app" "$stage/iDeploy.app"
+ln -s /Applications "$stage/Applications"
+hdiutil create -volname "iDeploy $tag" -srcfolder "$stage" -ov -format UDZO "bin/release/$disk_image"
+hdiutil verify "bin/release/$disk_image" >/dev/null
+
+cp "bin/release/$archive" "$appcast_stage/"
 appcast_args=(--download-url-prefix "https://github.com/adolphJane/iDeploy/releases/download/$tag/")
 if [[ -n "${SPARKLE_ED25519_PRIVATE_KEY:-}" ]]; then
   printf '%s' "$SPARKLE_ED25519_PRIVATE_KEY" | go run build/darwin/verify_sparkle_key.go "$public_key"
   printf '%s' "$SPARKLE_ED25519_PRIVATE_KEY" | "$sparkle_cache/bin/generate_appcast" \
-    --ed-key-file - "${appcast_args[@]}" "$stage"
+    --ed-key-file - "${appcast_args[@]}" "$appcast_stage"
 else
   umask 077
-  "$sparkle_cache/bin/generate_keys" --account com.ideploy.app -x "$stage/private-key.txt"
-  go run build/darwin/verify_sparkle_key.go "$public_key" < "$stage/private-key.txt"
-  "$sparkle_cache/bin/generate_appcast" --ed-key-file "$stage/private-key.txt" \
-    "${appcast_args[@]}" "$stage"
+  "$sparkle_cache/bin/generate_keys" --account com.ideploy.app -x "$appcast_stage/private-key.txt"
+  go run build/darwin/verify_sparkle_key.go "$public_key" < "$appcast_stage/private-key.txt"
+  "$sparkle_cache/bin/generate_appcast" --ed-key-file "$appcast_stage/private-key.txt" \
+    "${appcast_args[@]}" "$appcast_stage"
 fi
-test -s "$stage/appcast.xml"
-cp "$stage/appcast.xml" bin/release/appcast.xml
+test -s "$appcast_stage/appcast.xml"
+cp "$appcast_stage/appcast.xml" bin/release/appcast.xml
+(cd bin/release && shasum -a 256 "$archive" "$disk_image" > SHA256SUMS.txt)

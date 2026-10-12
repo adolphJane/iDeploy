@@ -27,7 +27,7 @@ export function CancelJob(id: string): $CancellablePromise<void> {
     return $Call.ByID(87326605, id);
 }
 
-export function CheckForAppUpdates(): $CancellablePromise<void> {
+export function CheckForAppUpdates(): $CancellablePromise<boolean> {
     return $Call.ByID(4032869032);
 }
 
@@ -125,6 +125,10 @@ export function DetectDeploymentVersion(deploymentID: string): $CancellablePromi
     return $Call.ByID(1641358468, deploymentID);
 }
 
+export function DownloadAppUpdate(downloadURL: string): $CancellablePromise<string> {
+    return $Call.ByID(2710331338, downloadURL);
+}
+
 export function GenerateDockerfile(input: $models.DockerfileGenerationInput): $CancellablePromise<$models.DockerfileGenerationView> {
     return $Call.ByID(2152379449, input);
 }
@@ -133,8 +137,16 @@ export function GetAISettings(): $CancellablePromise<$models.AISettingsView> {
     return $Call.ByID(2968732991);
 }
 
+export function GetAppUpdateProgress(): $CancellablePromise<$models.AppUpdateProgress> {
+    return $Call.ByID(1734588017);
+}
+
 export function GetAppUpdateStatus(): $CancellablePromise<$models.AppUpdateStatus> {
     return $Call.ByID(1865720224);
+}
+
+export function GetAutomaticUpdateChecks(): $CancellablePromise<boolean> {
+    return $Call.ByID(913134395);
 }
 
 export function GetBuildProxySettings(): $CancellablePromise<$models.BuildProxySettingsView> {
@@ -319,6 +331,10 @@ export function SaveDeepSeekAPIKey(key: string): $CancellablePromise<void> {
 
 export function SaveGeneratedDockerfile(input: $models.DockerfileSaveInput): $CancellablePromise<$models.ProjectView> {
     return $Call.ByID(587226264, input);
+}
+
+export function SetAutomaticUpdateChecks(enabled: boolean): $CancellablePromise<boolean> {
+    return $Call.ByID(558567943, enabled);
 }
 
 export function SetLaunchAtLogin(enabled: boolean): $CancellablePromise<$models.LaunchAtLoginStatus> {

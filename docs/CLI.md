@@ -7,7 +7,7 @@
 打开 iDeploy 的“设置 → 终端集成”，点击“安装命令”。macOS 会请求管理员授权，并创建：
 
 ```text
-/usr/local/bin/ideploy -> /Applications/iDeploy.app/Contents/MacOS/iDeploy
+/usr/local/bin/ideploy -> /Applications/iDeploy.app/Contents/MacOS/iDeployBackend
 ```
 
 如果应用安装在其他目录，链接会指向实际位置。移动应用后需要在设置中重新安装命令。

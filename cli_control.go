@@ -22,6 +22,8 @@ import (
 
 type cliRequest struct {
 	Command               string                            `json:"command"`
+	NativeMethod          string                            `json:"nativeMethod,omitempty"`
+	NativeArgs            []json.RawMessage                 `json:"nativeArgs,omitempty"`
 	RequestID             string                            `json:"requestId,omitempty"`
 	ID                    string                            `json:"id,omitempty"`
 	Project               *ProjectInput                     `json:"project,omitempty"`
@@ -195,6 +197,8 @@ func executeCLIRequest(ctx context.Context, service *SystemService, request cliR
 	var value any
 	var err error
 	switch request.Command {
+	case "native.call":
+		value, err = executeNativeCall(service, request.NativeMethod, request.NativeArgs)
 	case "version":
 		value = map[string]string{"version": appVersion, "platform": runtime.GOOS, "architecture": runtime.GOARCH}
 	case "doctor":

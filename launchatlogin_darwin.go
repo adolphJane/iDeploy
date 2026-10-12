@@ -23,7 +23,8 @@ func bundledAppExecutable() bool {
 	if err != nil {
 		return false
 	}
-	return strings.HasSuffix(filepath.ToSlash(path), "/iDeploy.app/Contents/MacOS/iDeploy")
+	return strings.HasSuffix(filepath.ToSlash(path), "/iDeploy.app/Contents/MacOS/iDeployBackend") ||
+		strings.HasSuffix(filepath.ToSlash(path), "/iDeploy.app/Contents/MacOS/iDeploy")
 }
 
 func launchAtLoginStatus() (LaunchAtLoginStatus, error) {

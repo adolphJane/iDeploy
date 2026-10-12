@@ -1,10 +1,15 @@
+//go:build !native
+
 package main
 
 import (
+	"context"
 	"embed"
 	"log"
 	"os"
+	"os/signal"
 	"runtime"
+	"syscall"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
@@ -28,6 +33,10 @@ func init() {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "native-backend" {
+		runNativeBackend()
+		return
+	}
 	if shouldRunMCP(os.Args[1:]) {
 		os.Exit(runMCPCommand(os.Stderr))
 	}
@@ -35,6 +44,19 @@ func main() {
 		os.Exit(runCLI(os.Args[1:], os.Stdout, os.Stderr))
 	}
 	runDesktop()
+}
+
+// SwiftUI owns the app lifecycle; this process retains the existing Go runtime
+// and its user-only Unix control channel for the native interface and CLI.
+func runNativeBackend() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	service := NewSystemService()
+	if err := service.start(ctx, true); err != nil {
+		log.Fatal(err)
+	}
+	defer service.close()
+	<-ctx.Done()
 }
 
 func runDesktop() {
@@ -100,6 +122,8 @@ func runDesktop() {
 		tray.SetTemplateIcon(icons.SystrayMacTemplate)
 	}
 	trayMenu := app.NewMenu()
+	trayMenu.Add("本机发布服务已就绪").SetEnabled(false)
+	trayMenu.AddSeparator()
 	trayMenu.Add("打开 iDeploy").OnClick(func(_ *application.Context) { window.Show() })
 	trayMenu.AddSeparator()
 	trayMenu.Add("退出").OnClick(func(_ *application.Context) { app.Quit() })

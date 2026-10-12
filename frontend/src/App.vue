@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { Clipboard, Events } from '@wailsio/runtime'
+import { Browser, Clipboard, Events } from '@wailsio/runtime'
 import { SystemService } from '../bindings/ideploy'
 import { releaseVersionIssue } from './release-version'
 
@@ -265,7 +265,8 @@ type BuildProxyRule = { upstream: string; mirror: string }
 type BuildProxySettingsView = { mode: BuildProxyMode; rules: BuildProxyRule[]; configured: boolean; builderName: string; detail: string }
 type CommandLineToolStatus = { installed: boolean; conflict: boolean; commandPath: string; executablePath: string; detail: string }
 type LaunchAtLoginStatus = { enabled: boolean; requiresApproval: boolean; available: boolean; detail: string }
-type AppUpdateStatus = { currentVersion: string; latestVersion: string; updateAvailable: boolean; releaseURL: string; publishedAt: string; checkedAt: string }
+type AppUpdateStatus = { currentVersion: string; latestVersion: string; updateAvailable: boolean; releaseURL: string; downloadURL: string; publishedAt: string; checkedAt: string }
+type AppUpdateProgress = { phase: string; detail: string; percent: number; downloadedBytes: number; totalBytes: number; filePath: string }
 type DockerfileGenerationView = {
   content: string
   technology: string
@@ -599,9 +600,16 @@ const launchAtLoginSaving = ref(false)
 const appUpdateStatus = ref<AppUpdateStatus | null>(null)
 const appUpdateLoading = ref(false)
 const appUpdateError = ref('')
+const appUpdateProgress = ref<AppUpdateProgress | null>(null)
+const appUpdateActionBusy = ref(false)
+const updateNoticeVisible = ref(false)
+const automaticUpdateChecks = ref<boolean | null>(null)
+const automaticUpdateSaving = ref(false)
 const copiedMCPConfig = ref<'codex' | 'json' | 'verify' | ''>('')
-const mcpCommandPath = computed(() => commandLineTool.value?.commandPath || '/usr/local/bin/ideploy')
-const mcpCodexCommand = computed(() => `codex mcp add ideploy -- ${mcpCommandPath.value} mcp`)
+const mcpCommandPath = computed(() => commandLineTool.value?.installed
+  ? commandLineTool.value.commandPath
+  : commandLineTool.value?.executablePath || '/usr/local/bin/ideploy')
+const mcpCodexCommand = computed(() => `codex mcp add ideploy -- '${mcpCommandPath.value.replaceAll("'", "'\\''")}' mcp`)
 const mcpClientConfig = computed(() => JSON.stringify({
   mcpServers: {
     ideploy: {
@@ -830,8 +838,10 @@ async function loadAppUpdateStatus() {
   if (appUpdateLoading.value) return
   appUpdateLoading.value = true
   appUpdateError.value = ''
+  appUpdateStatus.value = null
   try {
     appUpdateStatus.value = await SystemService.GetAppUpdateStatus() as unknown as AppUpdateStatus
+    if (appUpdateStatus.value.updateAvailable) updateNoticeVisible.value = true
   } catch (error) {
     appUpdateError.value = error instanceof Error ? error.message : String(error)
   } finally {
@@ -839,20 +849,82 @@ async function loadAppUpdateStatus() {
   }
 }
 
+async function loadAppUpdateProgress() {
+  try {
+    appUpdateProgress.value = await SystemService.GetAppUpdateProgress() as unknown as AppUpdateProgress
+  } catch {
+    // A missing progress snapshot should not interrupt version checks.
+  }
+}
+
+const showUpdateProgress = computed(() => !!appUpdateProgress.value && appUpdateProgress.value.phase !== 'idle' && appUpdateProgress.value.phase !== '')
+const updateProgressTitle = computed(() => ({
+  checking: '正在检查更新', available: '等待下载安装', downloading: '正在下载更新',
+  verifying: '正在验证更新', extracting: '正在解压更新', ready: '等待安装',
+  installing: '正在安装更新', downloaded: '安装包已下载', failed: '更新遇到问题',
+}[appUpdateProgress.value?.phase || ''] || '更新进度'))
+
+async function initializeAppUpdates() {
+  try {
+    automaticUpdateChecks.value = await SystemService.GetAutomaticUpdateChecks()
+    if (automaticUpdateChecks.value) await loadAppUpdateStatus()
+  } catch (error) {
+    appUpdateError.value = error instanceof Error ? error.message : String(error)
+  }
+}
+
 async function checkForAppUpdates() {
-  if (appUpdateLoading.value) return
-  appUpdateLoading.value = true
+  await loadAppUpdateStatus()
+  if (appUpdateStatus.value && !appUpdateError.value) showToast(appUpdateStatus.value.updateAvailable
+    ? `发现新版本 v${appUpdateStatus.value.latestVersion}，可点击“下载更新”。`
+    : `iDeploy v${appUpdateStatus.value.currentVersion} 已是最新版本。`)
+}
+
+async function downloadAppUpdate() {
+  if (!appUpdateStatus.value?.updateAvailable || appUpdateActionBusy.value) return
+  appUpdateActionBusy.value = true
+  updateNoticeVisible.value = true
   appUpdateError.value = ''
   try {
-    await SystemService.CheckForAppUpdates()
-    appUpdateStatus.value = await SystemService.GetAppUpdateStatus() as unknown as AppUpdateStatus
-    showToast(appUpdateStatus.value.updateAvailable
-      ? `发现新版本 v${appUpdateStatus.value.latestVersion}，更新器已打开。`
-      : `iDeploy v${appUpdateStatus.value.currentVersion} 已是最新版本。`)
+    if (await SystemService.CheckForAppUpdates()) {
+      await loadAppUpdateProgress()
+      return
+    }
+    if (appUpdateStatus.value.downloadURL === appUpdateStatus.value.releaseURL) {
+      await Browser.OpenURL(appUpdateStatus.value.releaseURL)
+      showToast('发布页面已打开，请从附件下载更新包。', 'info')
+      return
+    }
+    const downloadedFile = await SystemService.DownloadAppUpdate(appUpdateStatus.value.downloadURL)
+    showToast(`安装包已下载：${downloadedFile}`)
+  } catch (error) {
+    appUpdateError.value = error instanceof Error ? error.message : String(error)
+    showToast(`更新失败：${appUpdateError.value}`, 'error')
+  } finally {
+    appUpdateActionBusy.value = false
+  }
+}
+
+async function openAppUpdateWebsite() {
+  if (!appUpdateStatus.value?.releaseURL) return
+  try {
+    await Browser.OpenURL(appUpdateStatus.value.releaseURL)
+  } catch (error) {
+    showToast(`打开发布网站失败：${error instanceof Error ? error.message : String(error)}`, 'error')
+  }
+}
+
+async function toggleAutomaticUpdateChecks() {
+  if (automaticUpdateSaving.value || automaticUpdateChecks.value === null) return
+  automaticUpdateSaving.value = true
+  appUpdateError.value = ''
+  try {
+    automaticUpdateChecks.value = await SystemService.SetAutomaticUpdateChecks(!automaticUpdateChecks.value)
+    if (automaticUpdateChecks.value) void loadAppUpdateStatus()
   } catch (error) {
     appUpdateError.value = error instanceof Error ? error.message : String(error)
   } finally {
-    appUpdateLoading.value = false
+    automaticUpdateSaving.value = false
   }
 }
 
@@ -2609,8 +2681,12 @@ function shortVersion(value: string) {
 const eventCleanups: Array<() => void> = []
 let refreshTimer: number | undefined
 let clockTimer: number | undefined
+let updateProgressTimer: number | undefined
 onMounted(() => {
   void refresh()
+  void initializeAppUpdates()
+  void loadAppUpdateProgress()
+  updateProgressTimer = window.setInterval(() => { void loadAppUpdateProgress() }, 1000)
   void loadAISettings()
   void loadBuildProxySettings()
   eventCleanups.push(Events.On('job:updated', (event: { data: JobView }) => applyJobUpdate(event.data)))
@@ -2624,7 +2700,7 @@ onMounted(() => {
   }, 30000)
   document.addEventListener('keydown', modalKeyboard)
 })
-onUnmounted(() => { eventCleanups.forEach(off=>off()); window.clearInterval(refreshTimer); window.clearInterval(clockTimer); for (const timer of toastTimers.values()) window.clearTimeout(timer); toastTimers.clear(); document.removeEventListener('keydown',modalKeyboard) })
+onUnmounted(() => { eventCleanups.forEach(off=>off()); window.clearInterval(refreshTimer); window.clearInterval(clockTimer); window.clearInterval(updateProgressTimer); for (const timer of toastTimers.values()) window.clearTimeout(timer); toastTimers.clear(); document.removeEventListener('keydown',modalKeyboard) })
 
 const anyDialog = computed(()=>registryDialogOpen.value || databaseDialogOpen.value || serverDialogOpen.value || serverCredentialDialogOpen.value || workspaceProjectDialogOpen.value || dockerfileDialogOpen.value || deploymentDialogOpen.value || releaseDialogOpen.value)
 let focusBeforeDialog: HTMLElement | null = null
@@ -2656,7 +2732,7 @@ watch(activeSection, (section) => {
   if (section === 'databases') void loadDatabaseConnections()
   if (section === 'servers') void loadServers()
   if (section === 'deployments') void refreshDeploymentsWithFeedback()
-  if (section === 'settings') void Promise.all([refresh(), loadServers(), loadDeployments(), loadAISettings(), loadBuildProxySettings(), loadCommandLineToolStatus(), loadLaunchAtLoginStatus(), loadAppUpdateStatus()])
+  if (section === 'settings') void Promise.all([refresh(), loadServers(), loadDeployments(), loadAISettings(), loadBuildProxySettings(), loadCommandLineToolStatus(), loadLaunchAtLoginStatus()])
 })
 </script>
 
@@ -3306,8 +3382,32 @@ watch(activeSection, (section) => {
           <div class="settings-list">
             <div class="settings-row">
               <div class="settings-icon">↻</div>
-              <div class="settings-copy"><strong>iDeploy v{{ appUpdateStatus?.currentVersion || overview?.version || '—' }}</strong><span>{{ appUpdateStatus?.updateAvailable ? `发现新版本 v${appUpdateStatus.latestVersion}` : appUpdateStatus ? '当前已是最新正式版' : appUpdateError || '正在检查最新正式版…' }}</span><small>{{ appUpdateStatus ? `最新版本发布于 ${formatShortTime(appUpdateStatus.publishedAt)} · 上次检查 ${formatShortTime(appUpdateStatus.checkedAt)}` : '启动应用时会自动检查 GitHub 最新正式版。发现更新后自动下载并验证，退出应用后安装。' }}</small></div>
-              <button class="secondary-button" :disabled="appUpdateLoading" @click="checkForAppUpdates">{{ appUpdateLoading ? '检查中…' : '检查更新' }}</button>
+              <div class="settings-copy"><strong>iDeploy v{{ appUpdateStatus?.currentVersion || overview?.version || '—' }}</strong><span>{{ appUpdateError || (appUpdateStatus?.updateAvailable ? `发现新版本 v${appUpdateStatus.latestVersion}` : appUpdateStatus ? '当前已是最新正式版' : automaticUpdateChecks === false ? '自动检测已关闭' : '正在检查最新正式版…') }}</span><small>{{ appUpdateStatus ? `最新版本发布于 ${formatShortTime(appUpdateStatus.publishedAt)} · 上次检查 ${formatShortTime(appUpdateStatus.checkedAt)}` : '可手动检查 GitHub 最新正式版；发布包由 Sparkle 下载并安装更新。' }}</small></div>
+              <div class="settings-actions">
+                <button class="secondary-button" :disabled="appUpdateLoading" @click="checkForAppUpdates">{{ appUpdateLoading ? '检查中…' : '检查更新' }}</button>
+                <button v-if="appUpdateStatus?.updateAvailable" class="primary-button" :disabled="appUpdateActionBusy" @click="downloadAppUpdate">{{ appUpdateActionBusy ? '处理中…' : '下载安装' }}</button>
+              </div>
+            </div>
+            <div v-if="showUpdateProgress" class="settings-row update-progress-row" role="status">
+              <div class="settings-icon">↓</div>
+              <div class="settings-copy">
+                <strong>{{ updateProgressTitle }}</strong>
+                <span>{{ appUpdateProgress?.detail || '更新器正在处理，请稍候。' }}</span>
+                <div class="update-progress-track" :class="{ indeterminate: (appUpdateProgress?.percent ?? -1) < 0 }" role="progressbar" :aria-label="updateProgressTitle" :aria-valuenow="(appUpdateProgress?.percent ?? -1) >= 0 ? appUpdateProgress?.percent : undefined" aria-valuemin="0" aria-valuemax="100">
+                  <span :style="(appUpdateProgress?.percent ?? -1) >= 0 ? { width: `${appUpdateProgress?.percent}%` } : undefined"></span>
+                </div>
+                <small v-if="appUpdateProgress?.filePath" :title="appUpdateProgress.filePath">{{ appUpdateProgress.filePath }}</small>
+              </div>
+              <span v-if="(appUpdateProgress?.percent ?? -1) >= 0" class="update-progress-percent">{{ appUpdateProgress?.percent }}%</span>
+            </div>
+            <div class="settings-row">
+              <div class="settings-icon">↻</div>
+              <div class="settings-copy"><strong>自动检测更新</strong><span>开启后，每次打开应用都会检查新版本。</span><small>关闭后只在点击“检查更新”时检查，不影响手动下载。</small></div>
+              <label class="settings-toggle">
+                <input type="checkbox" role="switch" :checked="automaticUpdateChecks ?? false" :disabled="automaticUpdateSaving || automaticUpdateChecks === null" aria-label="自动检测更新" @change="toggleAutomaticUpdateChecks">
+                <span class="settings-toggle-track" aria-hidden="true"></span>
+                <span class="settings-toggle-label">{{ automaticUpdateSaving ? '设置中…' : automaticUpdateChecks === null ? '读取中…' : automaticUpdateChecks ? '已开启' : '已关闭' }}</span>
+              </label>
             </div>
             <div class="settings-row">
               <div class="settings-icon">⇧</div>
@@ -3352,7 +3452,7 @@ watch(activeSection, (section) => {
           <div class="panel-header"><div><span class="section-kicker">AI / MODEL CONTEXT PROTOCOL</span><h2>MCP 访问配置</h2></div><span class="platform-badge">本机 stdio</span></div>
           <div class="mcp-setup-intro">
             <div class="settings-icon">AI</div>
-            <div><strong>让 Codex 或其他 AI 客户端调用 iDeploy</strong><span>MCP Server 已内置在 ideploy 命令中，无需启动额外服务。请先安装上方终端命令，再将下面任一种配置添加到 AI 客户端。</span></div>
+            <div><strong>让 Codex 或其他 AI 客户端调用 iDeploy</strong><span>桌面端启动后会自动提供本机发布 Runtime。MCP Server 由 AI 客户端连接时启动；将下面任一种配置添加到客户端即可使用。安装终端命令后，配置路径会自动使用 ideploy 命令。</span></div>
           </div>
           <div class="mcp-setup-grid">
             <article class="mcp-setup-card">
@@ -3642,6 +3742,23 @@ watch(activeSection, (section) => {
       </div>
     </main>
     <div class="toast-stack" aria-live="polite" aria-atomic="false">
+      <section v-if="updateNoticeVisible && appUpdateStatus?.updateAvailable" class="app-update-notice" aria-label="发现应用更新" role="status">
+        <div class="app-update-notice-head">
+          <span class="app-update-notice-icon" aria-hidden="true">↻</span>
+          <div><strong>发现新版本 v{{ appUpdateStatus.latestVersion }}</strong><span>当前版本 v{{ appUpdateStatus.currentVersion }}</span></div>
+          <button type="button" class="toast-dismiss" aria-label="关闭更新提示" @click="updateNoticeVisible = false">×</button>
+        </div>
+        <div v-if="showUpdateProgress" class="app-update-notice-progress">
+          <div><strong>{{ updateProgressTitle }}</strong><span v-if="(appUpdateProgress?.percent ?? -1) >= 0">{{ appUpdateProgress?.percent }}%</span></div>
+          <div class="update-progress-track" :class="{ indeterminate: (appUpdateProgress?.percent ?? -1) < 0 }" role="progressbar" :aria-label="updateProgressTitle" :aria-valuenow="(appUpdateProgress?.percent ?? -1) >= 0 ? appUpdateProgress?.percent : undefined" aria-valuemin="0" aria-valuemax="100"><span :style="(appUpdateProgress?.percent ?? -1) >= 0 ? { width: `${appUpdateProgress?.percent}%` } : undefined"></span></div>
+          <small>{{ appUpdateProgress?.detail }}</small>
+        </div>
+        <p v-else>新版本已发布，可以打开发布网站查看，或直接下载安装。</p>
+        <div class="app-update-notice-actions">
+          <button type="button" class="secondary-button" @click="openAppUpdateWebsite">访问网站</button>
+          <button type="button" class="primary-button" :disabled="appUpdateActionBusy" @click="downloadAppUpdate">{{ appUpdateActionBusy ? '处理中…' : '下载安装' }}</button>
+        </div>
+      </section>
       <div v-for="toast in toasts" :key="toast.id" class="app-toast" :class="toast.kind" :role="toast.kind === 'error' ? 'alert' : 'status'">
         <span class="toast-icon" aria-hidden="true">{{ toast.kind === 'success' ? '✓' : toast.kind === 'error' ? '!' : 'i' }}</span>
         <span class="toast-message">{{ toast.message }}</span>

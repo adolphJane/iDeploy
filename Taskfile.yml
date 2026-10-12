@@ -22,22 +22,49 @@ tasks:
   build:
     summary: Builds the application
     cmds:
-      - task: "{{.GOOS}}:build"
+      - task: '{{if eq OS "darwin"}}native:build{{else}}{{.GOOS}}:build{{end}}'
 
   package:
     summary: Packages a production build of the application
     cmds:
-      - task: "{{.GOOS}}:package"
+      - task: '{{if eq OS "darwin"}}native:package{{else}}{{.GOOS}}:package{{end}}'
+
+  native:build:
+    platforms: [darwin]
+    cmds:
+      - bash build/darwin/build-native.sh build
+
+  native:package:
+    platforms: [darwin]
+    cmds:
+      - bash build/darwin/build-native.sh package
+
+  native:universal:
+    platforms: [darwin]
+    cmds:
+      - bash build/darwin/build-native.sh universal
+
+  debug:app:
+    summary: Builds the SwiftUI macOS .app bundle locally for debugging
+    platforms: [darwin]
+    cmds:
+      - task: native:universal
 
   run:
     summary: Runs the application
     cmds:
-      - task: "{{.GOOS}}:run"
+      - task: '{{if eq OS "darwin"}}native:run{{else}}{{.GOOS}}:run{{end}}'
+
+  native:run:
+    platforms: [darwin]
+    cmds:
+      - task: native:package
+      - open bin/iDeploy.app
 
   dev:
-    summary: Runs the application in development mode
+    summary: Builds and runs the native macOS application
     cmds:
-      - wails3 dev -config ./build/config.yml -port {{.VITE_PORT}}
+      - task: '{{if eq OS "darwin"}}native:run{{else}}darwin:run{{end}}'
 
   setup:docker:
     summary: Builds Docker image for cross-compilation (~800MB download)

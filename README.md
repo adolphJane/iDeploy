@@ -1,6 +1,6 @@
 # iDeploy
 
-iDeploy 是面向 macOS 的单用户 Docker 交付与远程运维桌面应用。应用已具备 Wails、Go、Vue、SQLite、持久化 Job Runner，以及可执行的 Docker 发布与回滚闭环。
+iDeploy 是面向 macOS 的单用户 Docker 交付与远程运维桌面应用。桌面界面使用 SwiftUI，业务核心使用 Go，并具备 SQLite、持久化 Job Runner，以及可执行的 Docker 发布与回滚闭环。
 
 ## 当前发布流程
 
@@ -26,25 +26,32 @@ iDeploy 是面向 macOS 的单用户 Docker 交付与远程运维桌面应用。
 
 ## 技术栈
 
-- Wails v3 Beta（已锁定到 `v3.0.0-beta.16`）；
+- SwiftUI + AppKit（macOS 原生窗口、导航、表单和菜单栏）；
 - Go；
-- Vue 3 + TypeScript + Vite；
+- 当前用户专属 Unix Socket 连接 SwiftUI 与 Go Runtime；
 - SQLite WAL；
 - macOS 系统菜单栏与后台生命周期。
+- 可在设置中启用 macOS 登录后启动；启动后菜单栏驻留，本机 MCP 客户端可直接调用发布 Runtime。
 
 ## 本地开发
 
-环境要求：Go 1.25+、Node.js、Xcode Command Line Tools、Docker、Git 和 SSH。
+环境要求：Go 1.25+、Xcode 及其命令行工具、Docker、Git 和 SSH。
 
 ```bash
-go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.16
-cd frontend
-npm install
-cd ..
-wails3 dev
+bash build/darwin/build-native.sh package
+open bin/iDeploy.app
 ```
 
-如果 `wails3` 不在 `PATH` 中，可直接运行 `$(go env GOPATH)/bin/wails3`。
+运行 `bash build/darwin/build-native.sh universal` 可生成 arm64 与 Intel 通用应用包。旧版 Vue/Wails 源码保留在 `frontend/`，供迁移核对；原生构建不需要 Node.js。
+
+在 macOS 上需要调试打包后的应用时，生成本地 `.app`：
+
+```bash
+bash build/darwin/build-native.sh universal
+open bin/iDeploy.app
+```
+
+这会在本机编译 arm64 与 Intel 通用版本并生成 `bin/iDeploy.app`，不需要触发 GitHub Actions。
 
 ## 终端调用
 
@@ -76,9 +83,9 @@ MCP 与 CLI 共享 Runtime Broker：桌面端运行时通过 Unix Socket 执行�
 ## 验证
 
 ```bash
-go test ./...
-cd frontend && npm run build
-cd .. && wails3 build
+go test -tags native ./...
+bash build/darwin/build-native.sh universal
+codesign --verify --deep --strict bin/iDeploy.app
 ```
 
 ## GitHub Releases 自动打包
@@ -94,22 +101,24 @@ git tag -a v0.2.0 -m "Release v0.2.0"
 git push origin v0.2.0
 ```
 
-Actions 自动测试并构建 macOS 13+ Universal 应用（arm64 + Intel x86_64），校验签名和架构后创建 Release，附件包括 `iDeploy-v0.2.0-macos-universal.zip`、`SHA256SUMS.txt` 和签名的 `appcast.xml`。解压得到 `iDeploy.app`。`v0.2.1-beta.1` 等带后缀的标签自动标记为预发布，不会通过正式版更新源推送；已有 Release 不覆盖，请使用新版本标签。
+推送版本标签后，Actions 自动测试并构建 macOS 13+ Universal 应用（arm64 + Intel x86_64），创建 DMG 安装镜像和 Sparkle 更新 ZIP，并校验两者的 SHA256。Release 附件包括 `iDeploy-v0.2.0-macos-universal.dmg`、`iDeploy-v0.2.0-macos-universal.zip`、`SHA256SUMS.txt` 和签名的 `appcast.xml`。DMG 可将应用拖到 Applications；ZIP 供应用内更新器使用。`v0.2.1-beta.1` 等带后缀的标签自动标记为预发布，不会通过正式版更新源推送；已有 Release 不覆盖，请使用新版本标签。
 
 应用显示版本由标签注入，Info.plist 的 `CFBundleShortVersionString` 使用对应的三段数字版本，`CFBundleVersion` 使用递增的发布构建号。未经过 Apple Developer ID 签名和公证，macOS 可能拦截首次启动；仅在确认下载来源及校验值后按系统安全提示处理，不要关闭全局安全保护。凭据存储当前依赖 macOS 钥匙串，因此暂不发布 Windows/Linux 安装包。
 
-只验证构建、不发布：进入 **Actions → Release macOS → Run workflow**，填写 `v0.0.0-test`。完成后从该运行的 Artifacts 下载 `macos-release`（保留 14 天）。本地可以先在 Keychain 中准备 iDeploy 的 Sparkle 签名密钥，再运行 `APP_BUILD_NUMBER=12345 bash build/darwin/release.sh v0.0.0-test`，输出位于 `bin/release/`。
+按需触发构建、不发布：进入 **Actions → Release macOS → Run workflow**，填写测试版本（默认 `v0.0.0-test`）。完成后从该运行的 Artifacts 下载 `macos-release`，其中包含 DMG、ZIP、校验文件和 appcast（保留 14 天）。普通代码推送不会触发发布工作流。
 
-注意：这里的标签是 **iDeploy 应用版本**，不是应用内管理的部署项目版本。首次安装带 Sparkle 的版本仍需手动完成；之后应用每次启动都会检查最新正式版，并在验证后自动下载、于退出时安装。更新源必须允许未登录的应用访问。
+注意：这里的标签是 **iDeploy 应用版本**，不是应用内管理的部署项目版本。首次安装带 Sparkle 的版本仍需手动完成；之后可在“设置 → 自动检测更新”控制是否每次启动检查。关闭后仍可手动检查并下载；开启时 Sparkle 会验证更新包，并在应用退出时安装已下载的更新。更新源必须允许未登录的应用访问。
 
 ## 目录结构
 
-- `main.go`：macOS 窗口、菜单栏与应用入口；
-- `systemservice.go`：Vue 可调用的桌面服务接口；
+- `macos/Sources`：SwiftUI 原生窗口和功能页面；
+- `native_main.go`：Go 后台、CLI 和 MCP 入口；
+- `native_call.go`：原生界面与 Go 服务之间的调用桥；
+- `systemservice.go`：桌面服务接口；
 - `internal/job`：SQLite 持久化任务队列；
 - `internal/platform`：数据库和本地路径基础设施；
 - `migrations`：数据库迁移；
-- `frontend`：Vue 桌面界面；
+- `frontend`：旧版 Vue/Wails 界面源码，保留供迁移核对；
 - `cli.go`、`cli_control.go`：终端命令及本地控制通道；
 - `mcp.go`：stdio MCP Server、工具 Schema 与业务请求映射；
 - `runtime_broker.go`：CLI 与 MCP 共用的桌面/Headless Runtime 调度；

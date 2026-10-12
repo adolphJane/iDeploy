@@ -24,8 +24,6 @@ import (
 	"ideploy/internal/project"
 	"ideploy/internal/registry"
 	"ideploy/internal/server"
-
-	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 // Release builds inject the Git tag through -ldflags -X.
@@ -469,10 +467,6 @@ func (s *SystemService) setDeploymentEmitter(emit func(DeploymentView)) {
 	if emit != nil {
 		s.emitDeployment = emit
 	}
-}
-
-func (s *SystemService) ServiceStartup(ctx context.Context, _ application.ServiceOptions) error {
-	return s.start(ctx, true)
 }
 
 // start initialises the application core without requiring a Wails runtime.
@@ -1150,14 +1144,6 @@ func (s *SystemService) DeleteProject(id string) error {
 	return nil
 }
 
-func (s *SystemService) ChooseProjectDirectory() (string, error) {
-	return application.Get().Dialog.OpenFile().
-		CanChooseDirectories(true).
-		CanChooseFiles(false).
-		SetTitle("选择项目目录").
-		PromptForSingleSelection()
-}
-
 func (s *SystemService) ListDeployments() ([]DeploymentView, error) {
 	deployments, err := s.deploymentStore()
 	if err != nil {
@@ -1431,14 +1417,6 @@ func (s *SystemService) TestServerConnection(input ServerConnectionInput) (Serve
 	defer cancel()
 	result := server.NewRemote().TestConnection(ctx, connection, secret)
 	return ServerConnectionTestView{Status: string(result.Status), Detail: result.Detail}, nil
-}
-
-func (s *SystemService) ChooseSSHPrivateKey() (string, error) {
-	return application.Get().Dialog.OpenFile().
-		CanChooseDirectories(false).
-		CanChooseFiles(true).
-		SetTitle("选择 SSH 私钥").
-		PromptForSingleSelection()
 }
 
 func (s *SystemService) InspectSSHHostKey(input SSHHostKeyInput) (HostKeyView, error) {
