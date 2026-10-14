@@ -230,7 +230,9 @@ struct ServersPage: View {
         }
         .environment(\.colorScheme, .light)
         .sheet(item: $formRequest) { request in
-            ServerFormView(server: request.server).environmentObject(model)
+            ServerFormView(server: request.server)
+                .environmentObject(model)
+                .id(request.id)
         }
         .onChange(of: selectedID) { _ in
             containers = J(nil)

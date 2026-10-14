@@ -182,6 +182,7 @@ struct DatabasesPage: View {
         .sheet(item: $formRequest) { request in
             DatabaseFormView(connection: request.connection)
                 .environmentObject(model)
+                .id(request.id)
         }
         .onChange(of: selectedID) { _ in
             schema = ""

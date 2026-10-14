@@ -149,6 +149,7 @@ struct ProjectsPage: View {
         .sheet(item: $formRequest) { request in
             ProjectFormView(project: request.project)
                 .environmentObject(model)
+                .id(request.id)
         }
         .onChange(of: selectedID) { _ in gitStatus = J(nil) }
         .sheet(isPresented: $showingGenerator) {

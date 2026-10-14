@@ -248,7 +248,9 @@ struct DeploymentsPage: View {
         }
         .environment(\.colorScheme, .light)
         .sheet(item: $formRequest) { request in
-            DeploymentFormView(deployment: request.deployment).environmentObject(model)
+            DeploymentFormView(deployment: request.deployment)
+                .environmentObject(model)
+                .id(request.id)
         }
         .onChange(of: selectedID) { _ in
             runtime = J(nil)

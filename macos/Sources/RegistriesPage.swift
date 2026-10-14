@@ -129,7 +129,9 @@ struct RegistriesPage: View {
             }
         }
         .sheet(item: $formRequest) { request in
-            RegistryFormView(registry: request.registry).environmentObject(model)
+            RegistryFormView(registry: request.registry)
+                .environmentObject(model)
+                .id(request.id)
         }
         .onChange(of: selectedID) { _ in
             isBrowsing = false
