@@ -268,9 +268,16 @@ struct KeyValue: View {
     let key: String
     let value: String
     var body: some View {
-        LabeledContent(key) {
-            Text(value.isEmpty ? "—" : value).textSelection(.enabled)
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(key)
+                .foregroundStyle(.secondary)
+                .frame(width: 48, alignment: .leading)
+            Text(value.isEmpty ? "—" : value)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
     }
 }
 

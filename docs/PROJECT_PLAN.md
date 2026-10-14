@@ -270,7 +270,7 @@ MVP 优先支持 Harbor Registry、项目、仓库、制品、标签、机器人
 
 ```text
 ┌──────────────────── iDeploy Desktop ────────────────────────┐
-│ Vue UI：项目 / 构建 / 制品 / 发布 / 主机 / Harbor / 运维     │
+│ SwiftUI：项目 / 构建 / 制品 / 发布 / 主机 / Harbor / 运维     │
 ├────────────────────────────┬─────────────────────────────────┤
 │ Go Application Core        │ Job Runner / Scheduler          │
 │ Project / Registry / SSH   │ 构建、推送、发布、巡检、回滚     │
@@ -287,8 +287,8 @@ MVP 优先支持 Harbor Registry、项目、仓库、制品、标签、机器人
 
 ### 5.1 架构原则
 
-- 桌面模块化单体优先：Vue UI 与 Go Core 通过桌面应用桥接通信；
-- Job Runner 首版运行在同一应用进程中，应用关闭到托盘时仍可继续任务；
+- 桌面模块化单体优先：SwiftUI 与 Go Core 通过当前用户专属的本地 Socket 通信；
+- Job Runner 运行在 Go 后台进程中，主窗口关闭后仍可继续任务；
 - 所有耗时或远程操作必须进入 Job，不阻塞 UI；
 - 所有发布动作幂等、可重试、可取消、可追踪；
 - 外部系统通过 Adapter 隔离，未来可替换 Docker、Harbor、Git、SSH 实现；
@@ -300,30 +300,24 @@ MVP 优先支持 Harbor Registry、项目、仓库、制品、标签、机器人
 ### 6.1 本地核心
 
 - Go 稳定版本；
-- 桌面容器：Wails，将 Go 核心与 Vue 前端打包为 macOS 原生 `.app`；
-- Wails 不捆绑完整 Chromium，在 macOS 上复用系统 WebKit/WebView；Vue 负责界面，Go 负责文件、Docker、SSH、Harbor、SQLite 和任务执行；
-- 新项目优先验证 Wails v3，以获得原生系统托盘、后台生命周期和更完整的桌面 API；由于当前 v3 仍为 Beta，Phase 0 必须锁定具体版本并完成稳定性门禁，未通过则回退到稳定版 Wails v2；
+- 桌面界面：SwiftUI 与 AppKit，Go 后台进程负责文件、Docker、SSH、Harbor、SQLite 和任务执行；
+- 原生界面通过当前用户专属的 Unix Socket 调用 Go Runtime；应用包同时包含界面与后台可执行文件；
 - 数据访问：SQLite WAL + sqlc，应用启动时执行内嵌迁移；
 - 异步任务：基于 SQLite 的持久化 Job Runner，支持启动恢复、取消、超时和串行锁；
 - Docker：官方 Docker Engine Go SDK；
 - SSH：`golang.org/x/crypto/ssh`，SFTP 用于传输版本化配置；
 - Git：优先调用受控的系统 Git，凭据通过临时 askpass/SSH 配置注入；
 - Harbor：Harbor v2 REST API；
-- 日志与状态流：使用桌面事件桥；交互终端采用独立流式通道；
+- 日志与状态流：使用本地服务接口；交互终端采用独立流式通道；
 - 指标：Prometheus 格式；日志：结构化 JSON。
 
 选择 Go 的原因是桌面打包、并发任务、SSH/Docker 生态和较低资源占用都适合本地核心服务。
 
 ### 6.2 桌面界面
 
-- Vue 3 + TypeScript + Vite；
-- UI：Naive UI 或 Element Plus，建议 Naive UI；
-- 状态：Pinia；
-- 请求：TanStack Query for Vue；
-- 终端：xterm.js；
-- 编辑器：Monaco Editor，用于 Dockerfile/Compose/YAML/环境变量编辑；
-- 本地能力：系统目录选择器、托盘、桌面通知、系统钥匙串；
-- 实时日志与终端通过桌面桥接事件传输。
+- SwiftUI 与 AppKit 原生控件；
+- 本地能力：系统目录选择器、菜单栏、桌面通知、系统钥匙串；
+- 实时状态由原生界面通过本地服务接口获取。
 
 ### 6.3 本地运行依赖
 
@@ -369,7 +363,7 @@ internal/
   notification/        桌面与 Webhook 通知
   adapter/             Docker、Git、SSH、Harbor 外部适配器
   platform/            DB、配置、日志、指标、桌面运行基础设施
-web/                    Vue 前端
+macos/Sources/          SwiftUI 原生界面
 migrations/             数据库迁移
 packaging/              macOS 打包、签名与公证资源
 docs/                   架构、接口、运维文档
@@ -487,13 +481,13 @@ Job Runner 获取任务时写入租约与心跳。应用异常退出后，重新
 
 ### Phase 0：工程骨架（约 1 周）
 
-- 初始化 Git、Wails v3 验证工程、Go、Vue 和本地开发环境；
+- 初始化 Git、Go、SwiftUI 和本地开发环境；
 - 建立桌面桥接、SQLite 迁移、Job Runner、统一配置与日志；
 - 验证 macOS 原生目录选择、Keychain、窗口关闭后台驻留、系统托盘、休眠唤醒和任务恢复；
 - 完成 CI：lint、test、桌面构建、安装包产物校验；
 - 输出 ADR、开发规范、错误码规范和桌面桥接接口基线。
 
-验收：确定 Wails v3 或 v2 的最终基线；一条命令启动开发应用，可生成首个 macOS 安装包，窗口关闭后任务继续运行，应用重启后本地数据保持完整。
+验收：一条命令启动开发应用，可生成首个 macOS 安装包，窗口关闭后任务继续运行，应用重启后本地数据保持完整。
 
 ### Phase 1：主机与容器运维 MVP（约 2 周）
 

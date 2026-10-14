@@ -1,11 +1,15 @@
 import AppKit
 import SwiftUI
 
+private struct ProjectFormRequest: Identifiable {
+    let id = UUID()
+    let project: J?
+}
+
 struct ProjectsPage: View {
     @EnvironmentObject private var model: AppModel
     @State private var selectedID: String?
-    @State private var editing: J?
-    @State private var showingForm = false
+    @State private var formRequest: ProjectFormRequest?
     @State private var showingGenerator = false
     @State private var gitStatus = J(nil)
     @State private var deleteTarget: J?
@@ -19,8 +23,7 @@ struct ProjectsPage: View {
                     WorkspaceListHeader(title: "项目", count: model.projects.count)
                     Spacer()
                     Button {
-                        editing = nil
-                        showingForm = true
+                        formRequest = ProjectFormRequest(project: nil)
                     } label: { Image(systemName: "plus") }
                     .buttonStyle(DeploySecondaryButtonStyle())
                     .help("添加项目")
@@ -81,10 +84,7 @@ struct ProjectsPage: View {
                         StateBadge(state: project["status"].string)
                     }
                     HStack(spacing: 8) {
-                        Button("编辑配置") {
-                            editing = project
-                            showingForm = true
-                        }
+                        Button("编辑配置") { formRequest = ProjectFormRequest(project: project) }
                         .buttonStyle(DeployPrimaryButtonStyle())
                         Button("检查项目") {
                             Task { await model.perform("InspectProject", [project.id]) }
@@ -146,8 +146,8 @@ struct ProjectsPage: View {
                 .background(DeployStyle.canvas)
             }
         }
-        .sheet(isPresented: $showingForm) {
-            ProjectFormView(project: editing)
+        .sheet(item: $formRequest) { request in
+            ProjectFormView(project: request.project)
                 .environmentObject(model)
         }
         .onChange(of: selectedID) { _ in gitStatus = J(nil) }

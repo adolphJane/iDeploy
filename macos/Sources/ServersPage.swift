@@ -1,12 +1,19 @@
 import AppKit
 import SwiftUI
 
+private struct ServerFormRequest: Identifiable {
+    let id = UUID()
+    let server: J?
+}
+
 struct ServersPage: View {
     @EnvironmentObject private var model: AppModel
     @State private var selectedID: String?
-    @State private var editing: J?
-    @State private var showingForm = false
+    @State private var formRequest: ServerFormRequest?
     @State private var containers = J(nil)
+    @State private var loadingContainers = false
+    @State private var loadedContainersID: String?
+    @State private var containerLoadID = UUID()
     @State private var hostKey = J(nil)
     @State private var deleteTarget: J?
     @State private var logText = ""
@@ -21,8 +28,7 @@ struct ServersPage: View {
                     WorkspaceListHeader(title: "服务器", count: model.servers.count)
                     Spacer()
                     Button {
-                        editing = nil
-                        showingForm = true
+                        formRequest = ServerFormRequest(server: nil)
                     } label: { Image(systemName: "plus") }
                     .buttonStyle(DeploySecondaryButtonStyle())
                     .help("添加服务器")
@@ -97,7 +103,7 @@ struct ServersPage: View {
                         }.padding(6)
                     }
                     HStack {
-                        Button("编辑连接") { editing = server; showingForm = true }
+                        Button("编辑连接") { formRequest = ServerFormRequest(server: server) }
                         Button("测试 SSH") {
                             Task { await model.perform("TestSavedServerConnection", [server.id]) }
                         }
@@ -135,9 +141,17 @@ struct ServersPage: View {
                     HStack {
                         SectionHeading("远程容器")
                         Spacer()
+                        if loadingContainers {
+                            AppLoadingView(title: "正在加载容器…")
+                        }
                         if containers["stale"].bool { Text("缓存数据").foregroundStyle(.secondary) }
                     }
-                    if containers.isNull || containers["containers"].array.isEmpty {
+                    if loadingContainers && loadedContainersID != server.id {
+                        AppLoadingView(title: "正在读取这台服务器上的容器…")
+                            .padding(18)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .deployCard(fill: DeployStyle.overviewPanel)
+                    } else if containers.isNull || containers["containers"].array.isEmpty {
                         HStack(spacing: 13) {
                             Image(systemName: "shippingbox")
                                 .font(.system(size: 20, weight: .medium))
@@ -214,12 +228,15 @@ struct ServersPage: View {
                 .background(DeployStyle.canvas)
             }
         }
-        .sheet(isPresented: $showingForm) {
-            ServerFormView(server: editing).environmentObject(model)
+        .environment(\.colorScheme, .light)
+        .sheet(item: $formRequest) { request in
+            ServerFormView(server: request.server).environmentObject(model)
         }
         .onChange(of: selectedID) { _ in
             containers = J(nil)
             hostKey = J(nil)
+            loadedContainersID = nil
+            loadingContainers = selectedID != nil
         }
         .sheet(isPresented: $showingLogs) {
             VStack(alignment: .leading, spacing: 12) {
@@ -247,7 +264,17 @@ struct ServersPage: View {
     }
 
     private func loadContainers(_ id: String) {
-        Task { containers = await model.perform("ListRemoteContainers", [id], refreshAfter: false) ?? J(nil) }
+        guard selectedID == id else { return }
+        let requestID = UUID()
+        containerLoadID = requestID
+        loadingContainers = true
+        Task {
+            let nextContainers = await model.perform("ListRemoteContainers", [id], refreshAfter: false) ?? J(nil)
+            guard selectedID == id, containerLoadID == requestID else { return }
+            containers = nextContainers
+            loadedContainersID = id
+            loadingContainers = false
+        }
     }
 
     private func operate(_ serverID: String, _ containerID: String, _ action: String) {

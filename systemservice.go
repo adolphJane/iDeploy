@@ -396,7 +396,7 @@ type DeploymentView struct {
 }
 
 // SystemService owns Phase 0 application infrastructure and exposes a narrow,
-// typed bridge to the Vue frontend.
+// typed interface to the native UI, CLI, and MCP.
 type SystemService struct {
 	mu sync.RWMutex
 
@@ -469,7 +469,7 @@ func (s *SystemService) setDeploymentEmitter(emit func(DeploymentView)) {
 	}
 }
 
-// start initialises the application core without requiring a Wails runtime.
+// start initialises the application core without requiring the desktop UI.
 // The desktop enables the local control socket; a one-shot CLI invocation does
 // not, because it already owns and calls this service directly.
 func (s *SystemService) start(ctx context.Context, serveControl bool) error {
@@ -579,7 +579,7 @@ func (s *SystemService) ListRegistries() ([]RegistryView, error) {
 }
 
 // ListDatabaseConnections returns locally saved remote database profiles. The
-// password is intentionally never exposed to the frontend.
+// password is intentionally never exposed to the UI.
 func (s *SystemService) ListDatabaseConnections() ([]DatabaseConnectionView, error) {
 	store, err := s.databaseStore()
 	if err != nil {

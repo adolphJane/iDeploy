@@ -1,11 +1,15 @@
 import AppKit
 import SwiftUI
 
+private struct RegistryFormRequest: Identifiable {
+    let id = UUID()
+    let registry: J?
+}
+
 struct RegistriesPage: View {
     @EnvironmentObject private var model: AppModel
     @State private var selectedID: String?
-    @State private var editing: J?
-    @State private var showingForm = false
+    @State private var formRequest: RegistryFormRequest?
     @State private var projects: [J] = []
     @State private var repositories: [J] = []
     @State private var artifacts: [J] = []
@@ -42,7 +46,7 @@ struct RegistriesPage: View {
                 HStack {
                     WorkspaceListHeader(title: "镜像仓库", count: model.registries.count)
                     Spacer()
-                    Button { editing = nil; showingForm = true } label: { Image(systemName: "plus") }
+                    Button { formRequest = RegistryFormRequest(registry: nil) } label: { Image(systemName: "plus") }
                         .buttonStyle(DeploySecondaryButtonStyle())
                     .help("添加仓库")
                 }
@@ -124,8 +128,8 @@ struct RegistriesPage: View {
                 .background(DeployStyle.canvas)
             }
         }
-        .sheet(isPresented: $showingForm) {
-            RegistryFormView(registry: editing).environmentObject(model)
+        .sheet(item: $formRequest) { request in
+            RegistryFormView(registry: request.registry).environmentObject(model)
         }
         .onChange(of: selectedID) { _ in
             isBrowsing = false
@@ -173,7 +177,7 @@ struct RegistriesPage: View {
                 StateBadge(state: registry["status"].string)
             }
             HStack(spacing: 8) {
-                Button("编辑配置") { editing = registry; showingForm = true }
+                Button("编辑配置") { formRequest = RegistryFormRequest(registry: registry) }
                     .buttonStyle(DeployPrimaryButtonStyle())
                 Button(checkingRegistryID == registry.id ? "检测中…" : "检测连接") {
                     Task { await testConnection(registry.id) }

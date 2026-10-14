@@ -1,13 +1,20 @@
 import SwiftUI
 
+private struct DeploymentFormRequest: Identifiable {
+    let id = UUID()
+    let deployment: J?
+}
+
 struct DeploymentsPage: View {
     @EnvironmentObject private var model: AppModel
     @State private var selectedID: String?
     @State private var runtime = J(nil)
     @State private var releases: [J] = []
     @State private var environment = J(nil)
-    @State private var editing: J?
-    @State private var showingForm = false
+    @State private var loadingDetail = false
+    @State private var loadedDetailID: String?
+    @State private var detailLoadID = UUID()
+    @State private var formRequest: DeploymentFormRequest?
     @State private var showingPublish = false
     @State private var showingEnvironment = false
     @State private var deleteTarget: J?
@@ -21,7 +28,7 @@ struct DeploymentsPage: View {
                 HStack {
                     WorkspaceListHeader(title: "部署", count: model.deployments.count)
                     Spacer()
-                    Button { editing = nil; showingForm = true } label: { Image(systemName: "plus") }
+                    Button { formRequest = DeploymentFormRequest(deployment: nil) } label: { Image(systemName: "plus") }
                         .buttonStyle(DeploySecondaryButtonStyle())
                     .help("添加部署")
                 }
@@ -79,7 +86,13 @@ struct DeploymentsPage: View {
                         SectionHeading(deployment["projectName"].string,
                                        "\(deployment["serverName"].string) · \(deployment["workloadName"].string)")
                         Spacer()
-                        StateBadge(state: runtime["status"].string)
+                        if loadingDetail && loadedDetailID != deployment.id {
+                            ProgressView()
+                                .controlSize(.small)
+                                .accessibilityLabel("正在读取部署状态")
+                        } else {
+                            StateBadge(state: runtime["status"].string)
+                        }
                     }
                     HStack {
                         Button("发布新版本") { showingPublish = true }
@@ -90,14 +103,20 @@ struct DeploymentsPage: View {
                             Button("重启") { operate(deployment.id, "restart") }
                             Button("停止") { operate(deployment.id, "stop") }
                         }
-                        Button("编辑配置") { editing = deployment; showingForm = true }
+                        Button("编辑配置") { formRequest = DeploymentFormRequest(deployment: deployment) }
                         Spacer()
                         Button("移除", role: .destructive) { deleteTarget = deployment }
                     }
                     HStack(spacing: 12) {
                         InfoTile(title: "工作负载", value: deployment["workloadKind"].string == "compose" ? "Compose" : "容器", symbol: "shippingbox")
                         InfoTile(title: "目标服务器", value: deployment["serverName"].string, symbol: "server.rack")
-                        InfoTile(title: "发布记录", value: "\(releases.count)", symbol: "clock.arrow.circlepath")
+                        InfoTile(title: "发布记录", value: loadingDetail && loadedDetailID != deployment.id ? "…" : "\(releases.count)", symbol: "clock.arrow.circlepath")
+                    }
+                    if loadingDetail {
+                        AppLoadingView(title: "正在加载部署状态、环境变量和发布记录…")
+                            .padding(18)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .deployCard(fill: DeployStyle.overviewPanel)
                     }
                     if !runtime["detail"].string.isEmpty {
                         Text(runtime["detail"].string)
@@ -122,30 +141,44 @@ struct DeploymentsPage: View {
                             }
                         }
                     }
-                    HStack {
-                        SectionHeading("环境变量")
-                        Spacer()
-                        if environment["pendingApply"].bool {
-                            Label("待下次发布生效", systemImage: "exclamationmark.circle")
-                                .foregroundStyle(.orange)
-                        }
-                        Button("管理变量") { showingEnvironment = true }
-                    }
-                    if environment["variables"].array.isEmpty {
-                        Text("尚未配置环境变量").foregroundStyle(.secondary)
-                    } else {
-                        ForEach(environment["variables"].array, id: \.selfName) { item in
-                            HStack {
-                                Text(item["name"].string).font(.system(.body, design: .monospaced))
-                                Spacer()
-                                Text(item["kind"].string == "secret" ? "钥匙串秘密" : item["value"].string)
-                                    .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack {
+                            SectionHeading("环境变量")
+                            Spacer()
+                            if environment["pendingApply"].bool {
+                                Label("待下次发布生效", systemImage: "exclamationmark.circle")
+                                    .foregroundStyle(.orange)
                             }
-                            Divider()
+                            Button("管理变量") { showingEnvironment = true }
+                        }
+                        if loadingDetail && loadedDetailID != deployment.id {
+                            Text("正在读取环境变量…").foregroundStyle(.secondary)
+                        } else if environment["variables"].array.isEmpty {
+                            Text("尚未配置环境变量").foregroundStyle(.secondary)
+                        } else {
+                            VStack(spacing: 0) {
+                                ForEach(environment["variables"].array, id: \.selfName) { item in
+                                    HStack {
+                                        Text(item["name"].string).font(.system(.body, design: .monospaced))
+                                        Spacer()
+                                        Text(item["kind"].string == "secret" ? "钥匙串秘密" : item["value"].string)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .padding(.vertical, 7)
+                                    if item.selfName != environment["variables"].array.last?.selfName {
+                                        Divider()
+                                    }
+                                }
+                            }
                         }
                     }
+                    .padding(18)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .deployCard(fill: DeployStyle.overviewPanel)
                     SectionHeading("发布记录")
-                    if releases.isEmpty {
+                    if loadingDetail && loadedDetailID != deployment.id {
+                        EmptyView()
+                    } else if releases.isEmpty {
                         HStack(spacing: 13) {
                             Image(systemName: "clock.arrow.circlepath")
                                 .font(.system(size: 20, weight: .medium))
@@ -213,13 +246,16 @@ struct DeploymentsPage: View {
                 .background(DeployStyle.canvas)
             }
         }
-        .sheet(isPresented: $showingForm) {
-            DeploymentFormView(deployment: editing).environmentObject(model)
+        .environment(\.colorScheme, .light)
+        .sheet(item: $formRequest) { request in
+            DeploymentFormView(deployment: request.deployment).environmentObject(model)
         }
         .onChange(of: selectedID) { _ in
             runtime = J(nil)
             releases = []
             environment = J(nil)
+            loadedDetailID = nil
+            loadingDetail = selectedID != nil
         }
         .sheet(isPresented: $showingPublish) {
             if let selected {
@@ -268,10 +304,20 @@ struct DeploymentsPage: View {
     }
 
     private func loadDetail(_ id: String) {
+        guard selectedID == id else { return }
+        let requestID = UUID()
+        detailLoadID = requestID
+        loadingDetail = true
         Task {
-            runtime = await model.perform("InspectDeploymentRuntime", [id], refreshAfter: false) ?? J(nil)
-            releases = (await model.perform("ListDeploymentReleases", [id], refreshAfter: false) ?? J(nil)).array
-            environment = await model.perform("ListDeploymentEnvironment", [id], refreshAfter: false) ?? J(nil)
+            let nextRuntime = await model.perform("InspectDeploymentRuntime", [id], refreshAfter: false) ?? J(nil)
+            let nextReleases = (await model.perform("ListDeploymentReleases", [id], refreshAfter: false) ?? J(nil)).array
+            let nextEnvironment = await model.perform("ListDeploymentEnvironment", [id], refreshAfter: false) ?? J(nil)
+            guard selectedID == id, detailLoadID == requestID else { return }
+            runtime = nextRuntime
+            releases = nextReleases
+            environment = nextEnvironment
+            loadedDetailID = id
+            loadingDetail = false
         }
     }
 

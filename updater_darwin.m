@@ -79,7 +79,7 @@ static void ideploy_set_update_progress(const char *phase, NSString *detail) {
 @end
 
 // Retain the controller for the lifetime of the process. Sparkle's updater and
-// UI must be created on the macOS main thread after Wails starts its run loop.
+// UI must be created on the macOS main thread after the app starts its run loop.
 static id ideployUpdaterController;
 static IDUpdateObserver *ideployUpdateObserver;
 

@@ -10,8 +10,6 @@
 *.pfx
 docs/audit-*/
 bin
-frontend/dist
-frontend/node_modules
 *.db
 *.db-shm
 *.db-wal

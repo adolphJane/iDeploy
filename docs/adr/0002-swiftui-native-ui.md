@@ -13,7 +13,6 @@ iDeploy 只发布 macOS 应用。为了与其他 Mac 产品在窗口、侧边栏
 - Go 继续负责 Docker、SSH、数据库、发布任务、CLI 和 MCP，不重写已经验证的业务逻辑。
 - SwiftUI 通过当前用户专属的 Unix Socket 调用经过白名单限制的 Go 服务方法。请求限制大小，Socket 权限为 0600。
 - 应用包内包含 `iDeployUI` 与 `iDeployBackend` 两个 arm64/x86_64 通用可执行文件；前者是应用入口，后者在窗口启动后作为子进程运行。
-- 旧版 Vue/Wails 源码暂留在 `frontend/`，用于迁移核对，不参与原生构建与发布。
 
 ## 影响
 

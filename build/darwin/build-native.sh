@@ -28,9 +28,12 @@ for architecture in "${architectures[@]}"; do
       -o "$target/iDeployBackend" .
   clang -arch "$architecture" -mmacosx-version-min=13.0 \
     -c updater_darwin.m -o "$target/updater.o"
+  swift_sources=(macos/Sources/*.swift macos/Sources/DesignSystem/Tokens/*.swift \
+    macos/Sources/DesignSystem/Theme/*.swift macos/Sources/DesignSystem/Components/*.swift \
+    macos/Sources/DesignSystem/Preview/*.swift)
   swiftc -swift-version 5 -target "$architecture-apple-macos13.0" \
     -import-objc-header macos/UpdaterBridge.h \
-    macos/Sources/*.swift "$target/updater.o" -o "$target/iDeployUI"
+    "${swift_sources[@]}" "$target/updater.o" -o "$target/iDeployUI"
 done
 
 if [[ "$mode" == build ]]; then
@@ -50,10 +53,9 @@ else
   cp bin/native-build/arm64/iDeployBackend "$app/Contents/MacOS/iDeployBackend"
 fi
 cp build/darwin/icons.icns "$app/Contents/Resources/icons.icns"
-if [[ -f build/darwin/Assets.car ]]; then
-  cp build/darwin/Assets.car "$app/Contents/Resources/Assets.car"
-fi
 cp build/darwin/Info.plist "$app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable iDeployUI' "$app/Contents/Info.plist"
+xcrun actool --compile "$app/Contents/Resources" --platform macosx \
+  --minimum-deployment-target 13.0 macos/Assets.xcassets
 codesign --force --deep --sign - "$app"
 echo "Built $app"

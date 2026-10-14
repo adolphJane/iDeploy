@@ -42,7 +42,7 @@ bash build/darwin/build-native.sh package
 open bin/iDeploy.app
 ```
 
-运行 `bash build/darwin/build-native.sh universal` 可生成 arm64 与 Intel 通用应用包。旧版 Vue/Wails 源码保留在 `frontend/`，供迁移核对；原生构建不需要 Node.js。
+运行 `bash build/darwin/build-native.sh universal` 可生成 arm64 与 Intel 通用应用包。原生构建需要 Go 和 Xcode。
 
 在 macOS 上需要调试打包后的应用时，生成本地 `.app`：
 
@@ -112,13 +112,12 @@ git push origin v0.2.0
 ## 目录结构
 
 - `macos/Sources`：SwiftUI 原生窗口和功能页面；
-- `native_main.go`：Go 后台、CLI 和 MCP 入口；
+- `main.go`：Go 后台、CLI 和 MCP 入口；
 - `native_call.go`：原生界面与 Go 服务之间的调用桥；
 - `systemservice.go`：桌面服务接口；
 - `internal/job`：SQLite 持久化任务队列；
 - `internal/platform`：数据库和本地路径基础设施；
 - `migrations`：数据库迁移；
-- `frontend`：旧版 Vue/Wails 界面源码，保留供迁移核对；
 - `cli.go`、`cli_control.go`：终端命令及本地控制通道；
 - `mcp.go`：stdio MCP Server、工具 Schema 与业务请求映射；
 - `runtime_broker.go`：CLI 与 MCP 共用的桌面/Headless Runtime 调度；

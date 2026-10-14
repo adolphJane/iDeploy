@@ -1,5 +1,10 @@
 import SwiftUI
 
+private struct DatabaseFormRequest: Identifiable {
+    let id = UUID()
+    let connection: J?
+}
+
 struct DatabasesPage: View {
     @EnvironmentObject private var model: AppModel
     @State private var selectedID: String?
@@ -14,8 +19,7 @@ struct DatabasesPage: View {
     @State private var sortColumn = ""
     @State private var sortDesc = false
     @State private var tab = 0
-    @State private var editing: J?
-    @State private var showingForm = false
+    @State private var formRequest: DatabaseFormRequest?
     @State private var deleteTarget: J?
     @State private var browserMessage = ""
     @State private var connectionMessage = ""
@@ -31,7 +35,7 @@ struct DatabasesPage: View {
                 HStack {
                     WorkspaceListHeader(title: "数据库", count: model.databases.count)
                     Spacer()
-                    Button { editing = nil; showingForm = true } label: { Image(systemName: "plus") }
+                    Button { formRequest = DatabaseFormRequest(connection: nil) } label: { Image(systemName: "plus") }
                         .buttonStyle(DeploySecondaryButtonStyle())
                         .help("添加数据库")
                 }
@@ -96,7 +100,7 @@ struct DatabasesPage: View {
                         Button(testingConnection ? "正在测试…" : "测试连接") { testConnection(connection.id) }
                             .buttonStyle(DeploySecondaryButtonStyle())
                             .disabled(testingConnection)
-                        Button("编辑连接") { editing = connection; showingForm = true }
+                        Button("编辑连接") { formRequest = DatabaseFormRequest(connection: connection) }
                             .buttonStyle(DeploySecondaryButtonStyle())
                         Spacer()
                         Button("移除", role: .destructive) { deleteTarget = connection }
@@ -175,9 +179,8 @@ struct DatabasesPage: View {
             }
         }
         .environment(\.colorScheme, .light)
-        .sheet(isPresented: $showingForm) {
-            DatabaseFormView(connection: editing)
-                .id(editing?.id ?? "new")
+        .sheet(item: $formRequest) { request in
+            DatabaseFormView(connection: request.connection)
                 .environmentObject(model)
         }
         .onChange(of: selectedID) { _ in
@@ -622,7 +625,7 @@ struct DatabaseFormView: View {
     private var canSave: Bool {
         !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !databaseName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        (driver == "mysql" || !databaseName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) &&
         !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         (Int(port).map { (1...65535).contains($0) } ?? false)
     }
@@ -683,7 +686,9 @@ struct DatabaseFormView: View {
                             .frame(width: 120)
                         }
                         VStack(alignment: .leading, spacing: 7) {
-                            Text("数据库名").font(.system(size: 12, weight: .semibold)).foregroundStyle(DeployStyle.ink)
+                            Text(driver == "mysql" ? "数据库名（可选）" : "数据库名")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(DeployStyle.ink)
                             TextField("要访问的数据库", text: $databaseName)
                                 .textFieldStyle(.roundedBorder)
                         }
@@ -748,7 +753,9 @@ struct DatabaseFormView: View {
                 Button {
                     guard canSave else {
                         testSucceeded = false
-                        testMessage = "请填写名称、地址、端口、数据库名和用户名后再测试。"
+                        testMessage = driver == "mysql"
+                            ? "请填写名称、地址、端口和用户名后再测试。"
+                            : "请填写名称、地址、端口、数据库名和用户名后再测试。"
                         return
                     }
                     Task {
