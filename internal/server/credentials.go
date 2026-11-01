@@ -12,6 +12,7 @@ import (
 const (
 	sshPasswordService      = "com.ideploy.ssh.password"
 	sshKeyPassphraseService = "com.ideploy.ssh.key-passphrase"
+	agentPairingService     = "com.ideploy.agent.pairing"
 )
 
 var ErrCredentialUnavailable = errors.New("SSH 密码凭据不可用")
@@ -24,6 +25,8 @@ func PrivateKeyPassphraseCredentialRef(serverID string) string {
 	return "keychain:ssh-key-passphrase:" + serverID
 }
 
+func AgentPairingCredentialRef(serverID string) string { return "keychain:agent-pairing:" + serverID }
+
 func credentialLocation(ref string) (service, account string, ok bool) {
 	for _, value := range []struct {
 		prefix  string
@@ -31,6 +34,7 @@ func credentialLocation(ref string) (service, account string, ok bool) {
 	}{
 		{prefix: "keychain:ssh-password:", service: sshPasswordService},
 		{prefix: "keychain:ssh-key-passphrase:", service: sshKeyPassphraseService},
+		{prefix: "keychain:agent-pairing:", service: agentPairingService},
 	} {
 		if strings.HasPrefix(ref, value.prefix) {
 			account = strings.TrimPrefix(ref, value.prefix)

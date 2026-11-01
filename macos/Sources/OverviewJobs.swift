@@ -11,6 +11,8 @@ private enum JobPresentation {
         case "deployment.release": "项目发布"
         case "deployment.rollback": "版本回滚"
         case "deployment.resume": "继续发布"
+        case "domain.binding.apply": "应用域名入口"
+        case "domain.binding.remove": "解除域名入口"
         default: type.isEmpty ? "后台任务" : type
         }
     }

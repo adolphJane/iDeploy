@@ -3,13 +3,14 @@ import Combine
 import Foundation
 
 enum AppSection: String, CaseIterable, Identifiable {
-    case overview, deployments, servers, projects, registries, databases, settings
+    case overview, deployments, servers, domains, projects, registries, databases, settings
     var id: String { rawValue }
     var title: String {
         switch self {
         case .overview: "总览"
         case .deployments: "部署"
         case .servers: "服务器"
+        case .domains: "域名"
         case .projects: "项目"
         case .registries: "镜像仓库"
         case .databases: "数据库"
@@ -21,6 +22,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .overview: "square.grid.2x2"
         case .deployments: "shippingbox"
         case .servers: "server.rack"
+        case .domains: "globe"
         case .projects: "folder"
         case .registries: "archivebox"
         case .databases: "externaldrive"
@@ -35,12 +37,21 @@ final class AppModel: ObservableObject {
     @Published var overview = J(nil)
     @Published var deployments: [J] = []
     @Published var servers: [J] = []
+    @Published var domains: [J] = []
+    @Published var dnsConnections: [J] = []
     @Published var projects: [J] = []
     @Published var registries: [J] = []
     @Published var databases: [J] = []
     @Published var error: String?
     @Published var busy = false
     @Published var ready = false
+    @Published private(set) var manualRefreshRevision = 0
+    @Published var domainDataLoading = false
+
+    func refreshFromUser() async {
+        await refresh()
+        manualRefreshRevision += 1
+    }
 
     func start() async {
         if ready { return }
@@ -65,12 +76,16 @@ final class AppModel: ObservableObject {
                 let nextOverview = try await NativeBridge.call("GetOverview")
                 let nextDeployments = try await NativeBridge.call("ListDeployments").array
                 let nextServers = try await NativeBridge.call("ListServers").array
+                let nextDomains = try await NativeBridge.call("ListDomains").array
+                let nextDNSConnections = try await NativeBridge.call("ListDNSConnections").array
                 let nextProjects = try await NativeBridge.call("ListProjects").array
                 let nextRegistries = try await NativeBridge.call("ListRegistries").array
                 let nextDatabases = try await NativeBridge.call("ListDatabaseConnections").array
                 overview = nextOverview
                 deployments = nextDeployments
                 servers = nextServers
+                domains = nextDomains
+                dnsConnections = nextDNSConnections
                 projects = nextProjects
                 registries = nextRegistries
                 databases = nextDatabases

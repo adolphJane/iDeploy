@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import SwiftUI
 
 final class NativeAppDelegate: NSObject, NSApplicationDelegate {
@@ -7,6 +8,15 @@ final class NativeAppDelegate: NSObject, NSApplicationDelegate {
     var showWindow: (() -> Void)?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let event = NSAppleEventManager.shared().currentAppleEvent
+        let launchedAtLogin = event?.eventID == kAEOpenApplication &&
+            event?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
+        if launchedAtLogin {
+            NSApp.setActivationPolicy(.accessory)
+            DispatchQueue.main.async {
+                NSApp.windows.filter(\.canBecomeKey).forEach { $0.orderOut(nil) }
+            }
+        }
         ideploy_start_app_updater()
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = NSImage(systemSymbolName: "shippingbox", accessibilityDescription: "iDeploy")
@@ -37,6 +47,7 @@ final class NativeAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openWindow() {
+        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         if let window = NSApp.windows.first(where: { $0.canBecomeKey && !$0.isVisible }) {
             window.makeKeyAndOrderFront(nil)
@@ -72,8 +83,9 @@ struct IDeployApp: App {
         .commands {
             CommandGroup(replacing: .newItem) { }
             CommandMenu("操作") {
-                Button("刷新") { Task { await model.refresh() } }
+                Button("刷新") { Task { await model.refreshFromUser() } }
                     .keyboardShortcut("r")
+                    .disabled(model.busy || (model.section == .domains && model.domainDataLoading))
                 Divider()
                 Button("总览") { model.section = .overview }.keyboardShortcut("1")
                 Button("部署") { model.section = .deployments }.keyboardShortcut("2")

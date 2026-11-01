@@ -492,7 +492,7 @@ func (s *SystemService) deploymentOperationHandler(ctx context.Context, task job
 		return errors.New("远端工作负载不存在，请刷新并检查绑定")
 	}
 	if p.Action == "restart" && target.WorkloadKind == "container" {
-		return s.recreateDeploymentContainer(ctx, store, target, host, selected, reporter, remote)
+		return s.recreateDeploymentContainer(ctx, store, target, host, task.ID, selected, reporter, remote)
 	}
 	if p.Action != "restart" {
 		desired := "running"
@@ -510,7 +510,7 @@ func (s *SystemService) deploymentOperationHandler(ctx context.Context, task job
 			break
 		}
 		reporter.Progress(15+i*65/len(selected), fmt.Sprintf("%s · %s", p.Action, c.Name))
-		if err := remote.OperateContainer(ctx, host, p.Action, c.ID); err != nil {
+		if err := remote.ControlContainer(ctx, host, target.ServerID, server.AgentStageID(task.ID, "container."+p.Action+":"+c.ID), p.Action, c.ID); err != nil {
 			failures = append(failures, fmt.Errorf("%s: %w", c.Name, err))
 		}
 	}
@@ -538,7 +538,7 @@ func (s *SystemService) deploymentOperationHandler(ctx context.Context, task job
 	return errors.Join(failures...)
 }
 
-func (s *SystemService) recreateDeploymentContainer(ctx context.Context, store *deployment.Store, target deployment.Target, host server.Connection, selected []server.Container, reporter job.Reporter, remote *server.Remote) error {
+func (s *SystemService) recreateDeploymentContainer(ctx context.Context, store *deployment.Store, target deployment.Target, host server.Connection, jobID string, selected []server.Container, reporter job.Reporter, remote *server.Remote) error {
 	if len(selected) != 1 {
 		return errors.New("单容器部署匹配到多个远端容器，无法安全重建")
 	}
@@ -558,7 +558,7 @@ func (s *SystemService) recreateDeploymentContainer(ctx context.Context, store *
 		labels["com.ideploy.version"] = release.Version
 	}
 	reporter.Progress(20, fmt.Sprintf("正在使用原镜像重建容器并注入 %d 个环境变量", len(environment)))
-	replacement, err := remote.DeployContainer(ctx, host, target.WorkloadName, image, target.RestartPolicy, target.ContainerPorts, labels, environment)
+	replacement, err := remote.DeployContainerWithAgent(ctx, host, target.ServerID, jobID, target.WorkloadName, image, target.RestartPolicy, target.ContainerPorts, labels, environment)
 	if err != nil {
 		return err
 	}
@@ -571,7 +571,7 @@ func (s *SystemService) recreateDeploymentContainer(ctx context.Context, store *
 		} else {
 			matched := deployment.Match(target, containers)
 			if len(matched) == 1 && matched[0].State == "running" && matched[0].Health != "unhealthy" && matched[0].Health != "starting" {
-				if err := remote.CommitContainerReplacement(ctx, host, replacement); err != nil {
+				if err := remote.CommitContainerReplacementWithAgent(ctx, host, target.ServerID, jobID, replacement); err != nil {
 					return fmt.Errorf("新容器已运行，但清理旧容器失败: %w", err)
 				}
 				if err := store.MarkEnvironmentApplied(ctx, target.ID, target.EnvironmentRevision); err != nil {
@@ -599,7 +599,7 @@ func (s *SystemService) recreateDeploymentContainer(ctx context.Context, store *
 	}
 	restoreContext, cancel := context.WithTimeout(context.Background(), 75*time.Second)
 	defer cancel()
-	if restoreErr := remote.RollbackContainerReplacement(restoreContext, host, replacement); restoreErr != nil {
+	if restoreErr := remote.RollbackContainerReplacementWithAgent(restoreContext, host, target.ServerID, jobID, replacement); restoreErr != nil {
 		return errors.Join(fmt.Errorf("重建后健康检查失败: %s", lastDetail), fmt.Errorf("恢复上一容器失败: %w", restoreErr))
 	}
 	return fmt.Errorf("重建后健康检查失败: %s；已恢复上一容器", lastDetail)

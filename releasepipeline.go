@@ -473,27 +473,27 @@ func (s *SystemService) deploymentReleaseHandler(ctx context.Context, task job.J
 		}
 	}
 	if target.WorkloadKind == "compose" {
-		if err := remote.UploadCompose(ctx, host, target.ID, manifest); err != nil {
+		if err := remote.UploadComposeWithAgent(ctx, host, target.ServerID, task.ID, target.ID, manifest); err != nil {
 			return err
 		}
-		if err := remote.PullCompose(ctx, host, target.ID, target.WorkloadName, release.Version); err != nil {
+		if err := remote.PullComposeWithAgent(ctx, host, target.ServerID, task.ID, target.ID, target.WorkloadName, release.Version); err != nil {
 			return err
 		}
 		if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleaseDeploying, "正在更新 Compose 项目", imageRef, source.revision, manifest); err != nil {
 			return err
 		}
-		if err := remote.UpCompose(ctx, host, target.ID, target.WorkloadName, release.Version); err != nil {
+		if err := remote.UpComposeWithAgent(ctx, host, target.ServerID, task.ID, target.ID, target.WorkloadName, release.Version); err != nil {
 			return err
 		}
 	} else {
-		if err := remote.PullImage(ctx, host, imageRef); err != nil {
+		if err := remote.PullImageWithAgent(ctx, host, target.ServerID, task.ID, imageRef); err != nil {
 			return err
 		}
 		runtimeImageRef, err := runtimeTaggedImageReference(imageRef, release.Version)
 		if err != nil {
 			return err
 		}
-		if err := remote.TagImage(ctx, host, imageRef, runtimeImageRef); err != nil {
+		if err := remote.TagImageWithAgent(ctx, host, target.ServerID, task.ID, imageRef, runtimeImageRef); err != nil {
 			return fmt.Errorf("创建远端运行版本标签: %w", err)
 		}
 		reporter.Log("远端运行镜像标签：" + runtimeImageRef + "（制品仍按 Digest 锁定）")
@@ -501,7 +501,7 @@ func (s *SystemService) deploymentReleaseHandler(ctx context.Context, task job.J
 			return err
 		}
 		reporter.Progress(74, "正在创建或更新远端容器")
-		return s.deployAndCheckContainer(ctx, deployments, release, target, host, reporter, remote, imageRef, runtimeImageRef, source.revision, manifest)
+		return s.deployAndCheckContainer(ctx, deployments, release, target, host, task.ID, reporter, remote, imageRef, runtimeImageRef, source.revision, manifest)
 	}
 	return s.finishReleaseHealthCheck(ctx, deployments, release, target, host, reporter, imageRef, source.revision, manifest, nil)
 }
@@ -624,10 +624,10 @@ func (s *SystemService) deploymentArtifactHandler(ctx context.Context, task job.
 		if source.Manifest == "" {
 			return errors.New("已有制品缺少 Compose 快照，无法部署")
 		}
-		if err := remote.UploadCompose(ctx, host, target.ID, source.Manifest); err != nil {
+		if err := remote.UploadComposeWithAgent(ctx, host, target.ServerID, task.ID, target.ID, source.Manifest); err != nil {
 			return err
 		}
-		if err := remote.PullCompose(ctx, host, target.ID, target.WorkloadName, source.Version); err != nil {
+		if err := remote.PullComposeWithAgent(ctx, host, target.ServerID, task.ID, target.ID, target.WorkloadName, source.Version); err != nil {
 			return err
 		}
 		deployDetail := "正在使用已有制品更新 Compose 项目"
@@ -637,18 +637,18 @@ func (s *SystemService) deploymentArtifactHandler(ctx context.Context, task job.
 		if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleaseDeploying, deployDetail, source.ImageRef, source.SourceRevision, source.Manifest); err != nil {
 			return err
 		}
-		if err := remote.UpCompose(ctx, host, target.ID, target.WorkloadName, source.Version); err != nil {
+		if err := remote.UpComposeWithAgent(ctx, host, target.ServerID, task.ID, target.ID, target.WorkloadName, source.Version); err != nil {
 			return err
 		}
 	} else {
-		if err := remote.PullImage(ctx, host, source.ImageRef); err != nil {
+		if err := remote.PullImageWithAgent(ctx, host, target.ServerID, task.ID, source.ImageRef); err != nil {
 			return err
 		}
 		runtimeImageRef, err := runtimeTaggedImageReference(source.ImageRef, source.Version)
 		if err != nil {
 			return err
 		}
-		if err := remote.TagImage(ctx, host, source.ImageRef, runtimeImageRef); err != nil {
+		if err := remote.TagImageWithAgent(ctx, host, target.ServerID, task.ID, source.ImageRef, runtimeImageRef); err != nil {
 			return fmt.Errorf("创建远端运行版本标签: %w", err)
 		}
 		reporter.Log("远端运行镜像标签：" + runtimeImageRef + "（制品仍按 Digest 锁定）")
@@ -659,12 +659,12 @@ func (s *SystemService) deploymentArtifactHandler(ctx context.Context, task job.
 		if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleaseDeploying, deployDetail, source.ImageRef, source.SourceRevision, source.Manifest); err != nil {
 			return err
 		}
-		return s.deployAndCheckContainer(ctx, deployments, release, target, host, reporter, remote, source.ImageRef, runtimeImageRef, source.SourceRevision, source.Manifest)
+		return s.deployAndCheckContainer(ctx, deployments, release, target, host, task.ID, reporter, remote, source.ImageRef, runtimeImageRef, source.SourceRevision, source.Manifest)
 	}
 	return s.finishReleaseHealthCheck(ctx, deployments, release, target, host, reporter, source.ImageRef, source.SourceRevision, source.Manifest, nil)
 }
 
-func (s *SystemService) deployAndCheckContainer(ctx context.Context, deployments *deployment.Store, release deployment.Release, target deployment.Target, host server.Connection, reporter job.Reporter, remote *server.Remote, imageRef, runtimeImageRef, revision, manifest string) error {
+func (s *SystemService) deployAndCheckContainer(ctx context.Context, deployments *deployment.Store, release deployment.Release, target deployment.Target, host server.Connection, jobID string, reporter job.Reporter, remote *server.Remote, imageRef, runtimeImageRef, revision, manifest string) error {
 	currentTarget, environment, err := s.resolveDeploymentEnvironmentRevision(ctx, deployments, target.ID)
 	if err != nil {
 		return err
@@ -676,7 +676,7 @@ func (s *SystemService) deployAndCheckContainer(ctx context.Context, deployments
 	if len(environment) > 0 {
 		reporter.Log(fmt.Sprintf("正在注入 %d 个运行环境变量", len(environment)))
 	}
-	replacement, err := remote.DeployContainer(ctx, host, target.WorkloadName, runtimeImageRef, target.RestartPolicy, target.ContainerPorts, map[string]string{
+	replacement, err := remote.DeployContainerWithAgent(ctx, host, target.ServerID, jobID, target.WorkloadName, runtimeImageRef, target.RestartPolicy, target.ContainerPorts, map[string]string{
 		"com.ideploy.pinned-image":         imageRef,
 		"com.ideploy.release-id":           release.ID,
 		"com.ideploy.version":              release.Version,
@@ -687,7 +687,7 @@ func (s *SystemService) deployAndCheckContainer(ctx context.Context, deployments
 	}
 	committed := false
 	err = s.finishReleaseHealthCheck(ctx, deployments, release, target, host, reporter, imageRef, revision, manifest, func() error {
-		commitErr := remote.CommitContainerReplacement(ctx, host, replacement)
+		commitErr := remote.CommitContainerReplacementWithAgent(ctx, host, target.ServerID, jobID, replacement)
 		if commitErr == nil {
 			committed = true
 		}
@@ -704,7 +704,7 @@ func (s *SystemService) deployAndCheckContainer(ctx context.Context, deployments
 	}
 	restoreContext, cancel := context.WithTimeout(context.Background(), 75*time.Second)
 	defer cancel()
-	if restoreErr := remote.RollbackContainerReplacement(restoreContext, host, replacement); restoreErr != nil {
+	if restoreErr := remote.RollbackContainerReplacementWithAgent(restoreContext, host, target.ServerID, jobID, replacement); restoreErr != nil {
 		return errors.Join(err, fmt.Errorf("恢复上一容器失败: %w", restoreErr))
 	}
 	return fmt.Errorf("%w；已恢复上一容器", err)

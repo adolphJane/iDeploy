@@ -14,8 +14,10 @@ import (
 	"sync"
 	"time"
 
+	"ideploy/internal/agent"
 	"ideploy/internal/databasebrowser"
 	"ideploy/internal/deployment"
+	"ideploy/internal/domain"
 	"ideploy/internal/job"
 	"ideploy/internal/platform/database"
 	"ideploy/internal/platform/instance"
@@ -286,12 +288,14 @@ type RemoteContainerView struct {
 }
 
 type RemoteContainersView struct {
-	ObservedAt string                `json:"observedAt"`
-	Stale      bool                  `json:"stale"`
-	ServerID   string                `json:"serverId"`
-	Status     string                `json:"status"`
-	Detail     string                `json:"detail"`
-	Containers []RemoteContainerView `json:"containers"`
+	ObservedAt     string                 `json:"observedAt"`
+	Stale          bool                   `json:"stale"`
+	ServerID       string                 `json:"serverId"`
+	Status         string                 `json:"status"`
+	Detail         string                 `json:"detail"`
+	Containers     []RemoteContainerView  `json:"containers"`
+	ListeningPorts []server.ListeningPort `json:"listeningPorts"`
+	PortsError     string                 `json:"portsError"`
 }
 
 type ProjectInput struct {
@@ -516,6 +520,11 @@ func (s *SystemService) startWithPaths(ctx context.Context, serveControl bool, p
 		_ = runtimeLock.Release()
 		return err
 	}
+	if err := domain.NewStore(db).ReconcileInterruptedExternalRoutes(ctx); err != nil {
+		db.Close()
+		_ = runtimeLock.Release()
+		return err
+	}
 
 	runner := job.NewRunner(store, func(value job.Job) {
 		s.mu.RLock()
@@ -526,11 +535,20 @@ func (s *SystemService) startWithPaths(ctx context.Context, serveControl bool, p
 	runner.Register("system.diagnostic", diagnosticHandler)
 	runner.Register("registry.test", s.registryTestHandler)
 	runner.Register("server.probe", s.serverProbeHandler)
+	runner.Register("server.agent.bootstrap", s.serverAgentBootstrapHandler)
+	runner.Register("server.agent.update", s.serverAgentBootstrapHandler)
+	runner.Register("server.agent.uninstall", s.serverAgentUninstallHandler)
+	runner.Register("server.certbot.issue", s.serverCertbotIssueHandler)
+	runner.Register("server.certbot.renew", s.serverCertbotRenewHandler)
 	runner.Register("server.container.operation", s.serverContainerOperationHandler)
 	runner.Register("deployment.operation", s.deploymentOperationHandler)
 	runner.Register("deployment.release", s.deploymentReleaseHandler)
 	runner.Register("deployment.rollback", s.deploymentRollbackHandler)
 	runner.Register("deployment.resume", s.deploymentResumeHandler)
+	runner.Register("domain.binding.apply", s.domainBindingHandler)
+	runner.Register("domain.binding.remove", s.domainBindingHandler)
+	runner.Register("domain.external.apply", s.externalRouteHandler)
+	runner.Register("domain.external.remove", s.externalRouteHandler)
 
 	s.mu.Lock()
 	s.db = db
@@ -905,7 +923,7 @@ func (s *SystemService) ListRegistryProjects(id string) (RegistryProjectsView, e
 	if err != nil {
 		return RegistryProjectsView{}, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	connection, err := registries.Get(ctx, id)
 	if err != nil {
@@ -1216,6 +1234,11 @@ func (s *SystemService) CreateDeployment(input DeploymentInput) (DeploymentView,
 // DeleteDeployment only removes iDeploy's local project-to-server association.
 // It intentionally never changes remote containers or source files.
 func (s *SystemService) DeleteDeployment(id string) error {
+	if domains, err := s.ListDeploymentDomains(id); err != nil {
+		return err
+	} else if len(domains) > 0 {
+		return errors.New("请先在域名页面移除该部署的绑定草稿，再删除部署")
+	}
 	deployments, err := s.deploymentStore()
 	if err != nil {
 		return err
@@ -1288,6 +1311,106 @@ func (s *SystemService) CreateServer(input ServerInput) (ServerView, error) {
 	view := toServerView(connection)
 	s.emitServerView(view)
 	return view, nil
+}
+
+func (s *SystemService) InstallServerAgent(serverID string) (JobView, error) {
+	return s.enqueueServerJob(serverID, "server.agent.bootstrap", struct {
+		ServerID string `json:"serverId"`
+	}{ServerID: serverID})
+}
+
+func (s *SystemService) UpdateServerAgent(serverID string) (JobView, error) {
+	return s.enqueueServerJob(serverID, "server.agent.update", struct {
+		ServerID string `json:"serverId"`
+	}{ServerID: serverID})
+}
+
+func (s *SystemService) UninstallServerAgent(serverID string) (JobView, error) {
+	return s.enqueueServerJob(serverID, "server.agent.uninstall", struct {
+		ServerID string `json:"serverId"`
+	}{ServerID: serverID})
+}
+
+func (s *SystemService) serverAgentUninstallHandler(ctx context.Context, task job.Job, reporter job.Reporter) error {
+	var payload struct {
+		ServerID string `json:"serverId"`
+	}
+	if err := json.Unmarshal([]byte(task.Payload), &payload); err != nil || payload.ServerID == "" {
+		return errors.New("invalid Agent uninstall payload")
+	}
+	servers, err := s.serverStore()
+	if err != nil {
+		return err
+	}
+	connection, err := servers.Get(ctx, payload.ServerID)
+	if err != nil {
+		return err
+	}
+	reporter.Progress(15, "检查 Agent 是否仍有执行中的操作")
+	if err := server.NewRemote().UninstallAgent(ctx, connection); err != nil {
+		return err
+	}
+	reporter.Progress(80, "删除本机 Agent 配对凭据")
+	if err := server.DeletePassword(ctx, server.AgentPairingCredentialRef(payload.ServerID)); err != nil {
+		return fmt.Errorf("远端 Agent 已卸载，但本机凭据清理失败: %w", err)
+	}
+	reporter.Progress(95, "Agent 已完全卸载；服务器连接与现有容器、证书保留")
+	return nil
+}
+
+func (s *SystemService) GetServerAgentStatus(serverID string) (map[string]any, error) {
+	servers, err := s.serverStore()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	connection, err := servers.Get(ctx, serverID)
+	if err != nil {
+		return nil, err
+	}
+	remote := server.NewRemote()
+	hello, err := remote.AgentGET(ctx, connection, serverID, "/v1/hello")
+	if err != nil {
+		return map[string]any{"status": "unavailable", "detail": err.Error()}, nil
+	}
+	metrics, err := remote.AgentGET(ctx, connection, serverID, "/v1/metrics")
+	if err != nil {
+		return map[string]any{"status": "degraded", "detail": err.Error()}, nil
+	}
+	var greeting, samples map[string]any
+	if err := json.Unmarshal(hello, &greeting); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(metrics, &samples); err != nil {
+		return nil, err
+	}
+	localHash, _ := server.BundledAgentHash(fmt.Sprint(greeting["arch"]))
+	return map[string]any{"status": "ready", "hello": greeting, "metrics": samples, "bundledSHA256": localHash,
+		"updateAvailable": localHash != "" && greeting["binarySHA256"] != localHash}, nil
+}
+
+func (s *SystemService) serverAgentBootstrapHandler(ctx context.Context, task job.Job, reporter job.Reporter) error {
+	var payload struct {
+		ServerID string `json:"serverId"`
+	}
+	if err := json.Unmarshal([]byte(task.Payload), &payload); err != nil || payload.ServerID == "" {
+		return errors.New("invalid Agent bootstrap payload")
+	}
+	servers, err := s.serverStore()
+	if err != nil {
+		return err
+	}
+	connection, err := servers.Get(ctx, payload.ServerID)
+	if err != nil {
+		return err
+	}
+	reporter.Progress(10, "检查服务器环境与 Agent 安装包")
+	if err := server.NewRemote().InstallAgent(ctx, connection, payload.ServerID); err != nil {
+		return err
+	}
+	reporter.Progress(100, "Agent 已安装并启动；等待能力握手")
+	return nil
 }
 
 func (s *SystemService) UpdateServer(id string, input ServerInput) (ServerView, error) {
@@ -1537,7 +1660,7 @@ func (s *SystemService) ListRemoteContainers(serverID string) (RemoteContainersV
 	if err != nil {
 		return RemoteContainersView{}, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	connection, err := servers.Get(ctx, serverID)
 	if err != nil {
@@ -1552,7 +1675,20 @@ func (s *SystemService) ListRemoteContainers(serverID string) (RemoteContainersV
 			Containers: make([]RemoteContainerView, 0),
 		}, nil
 	}
-	containers, err := server.NewRemote().ListContainers(ctx, connection)
+	remote := server.NewRemote()
+	var inventory agent.Inventory
+	usedAgent := false
+	if raw, agentErr := remote.AgentGET(ctx, connection, serverID, "/v1/inventory"); agentErr == nil {
+		if json.Unmarshal(raw, &inventory) == nil && inventory.ContainersError == "" {
+			usedAgent = true
+		}
+	}
+	var containers []server.Container
+	if usedAgent {
+		containers = inventory.Containers
+	} else {
+		containers, err = remote.ListContainers(ctx, connection)
+	}
 	store, storeErr := s.deploymentStore()
 	if storeErr != nil {
 		return RemoteContainersView{}, storeErr
@@ -1569,8 +1705,22 @@ func (s *SystemService) ListRemoteContainers(serverID string) (RemoteContainersV
 		return RemoteContainersView{}, err
 	}
 	result := RemoteContainersView{ServerID: serverID, Status: string(server.StatusHealthy), Detail: "远程容器列表已刷新", ObservedAt: time.Now().UTC().Format(time.RFC3339), Containers: make([]RemoteContainerView, 0, len(containers))}
+	if usedAgent {
+		result.Detail = "Agent 容器列表已刷新"
+		result.ObservedAt = inventory.ObservedAt
+	}
 	for _, container := range containers {
 		result.Containers = append(result.Containers, toRemoteContainerView(container))
+	}
+	if usedAgent && inventory.PortsError == "" {
+		result.ListeningPorts = inventory.ListeningPorts
+		return result, nil
+	}
+	ports, portsErr := remote.ListListeningPorts(ctx, connection)
+	if portsErr != nil {
+		result.PortsError = portsErr.Error()
+	} else {
+		result.ListeningPorts = ports
 	}
 	return result, nil
 }
@@ -1587,12 +1737,28 @@ func (s *SystemService) OperateRemoteContainer(serverID, containerID, action str
 }
 
 func (s *SystemService) DeleteServer(id string) error {
-	servers, err := s.serverStore()
+	store, err := s.domainStore()
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	used, err := store.CountServerBindings(ctx, id)
+	if err != nil {
+		return err
+	}
+	if used > 0 {
+		return errors.New("请先在域名页面移除此服务器部署的绑定草稿，再删除服务器")
+	}
+	if ingress, err := store.HasServerIngress(ctx, id); err != nil {
+		return err
+	} else if ingress {
+		return errors.New("此服务器仍有 iDeploy 受管入口，请先解绑其域名并核对入口状态")
+	}
+	servers, err := s.serverStore()
+	if err != nil {
+		return err
+	}
 	connection, err := servers.Get(ctx, id)
 	if err != nil {
 		return err
@@ -1613,6 +1779,7 @@ func (s *SystemService) DeleteServer(id string) error {
 	if connection.CredentialRef != "" {
 		_ = server.DeletePassword(ctx, connection.CredentialRef)
 	}
+	_ = server.DeletePassword(ctx, server.AgentPairingCredentialRef(id))
 	cleanupEnvironmentSecrets(ctx, environmentRefs)
 	return nil
 }
@@ -2130,7 +2297,7 @@ func (s *SystemService) serverContainerOperationHandler(ctx context.Context, tas
 		return err
 	}
 	reporter.Progress(20, "Connecting to remote Docker")
-	if err := server.NewRemote().OperateContainer(ctx, connection, payload.Action, payload.ContainerID); err != nil {
+	if err := server.NewRemote().ControlContainer(ctx, connection, payload.ServerID, task.ID, payload.Action, payload.ContainerID); err != nil {
 		return err
 	}
 	reporter.Log("docker " + payload.Action + " " + payload.ContainerID)

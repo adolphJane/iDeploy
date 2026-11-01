@@ -93,6 +93,10 @@ func (r *Remote) ListContainers(ctx context.Context, connection Connection) ([]C
 	if err != nil {
 		return nil, err
 	}
+	return ParseDockerContainers(output)
+}
+
+func ParseDockerContainers(output string) ([]Container, error) {
 	containers := make([]Container, 0)
 	scanner := bufio.NewScanner(strings.NewReader(output))
 	scanner.Buffer(make([]byte, 4096), 4*1024*1024)

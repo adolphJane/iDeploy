@@ -112,7 +112,11 @@ func (s *SystemService) GetContainerLogs(input ContainerLogsInput) (ContainerLog
 	if err != nil {
 		return ContainerLogsView{}, err
 	}
-	logs, err := server.NewRemote().ContainerLogs(ctx, host, input.ContainerID, input.Tail)
+	remote := server.NewRemote()
+	logs, err := remote.AgentLogs(ctx, host, input.ServerID, input.ContainerID, input.Tail)
+	if err != nil {
+		logs, err = remote.ContainerLogs(ctx, host, input.ContainerID, input.Tail)
+	}
 	if err != nil {
 		return ContainerLogsView{}, err
 	}

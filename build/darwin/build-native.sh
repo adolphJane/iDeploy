@@ -36,12 +36,20 @@ for architecture in "${architectures[@]}"; do
     "${swift_sources[@]}" "$target/updater.o" -o "$target/iDeployUI"
 done
 
+mkdir -p bin/native-build/agents
+for agent_arch in amd64 arm64; do
+  CGO_ENABLED=0 GOOS=linux GOARCH="$agent_arch" \
+    go build -trimpath -buildvcs=false -ldflags="-w -s" \
+      -o "bin/native-build/agents/ideploy-agent-linux-$agent_arch" ./cmd/ideploy-agent
+done
+
 if [[ "$mode" == build ]]; then
   echo "Built native SwiftUI and Go executables in bin/native-build/arm64"
   exit 0
 fi
 
 app="bin/iDeploy.app"
+rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 if [[ "$mode" == universal ]]; then
   lipo -create -output "$app/Contents/MacOS/iDeployUI" \
@@ -53,6 +61,8 @@ else
   cp bin/native-build/arm64/iDeployBackend "$app/Contents/MacOS/iDeployBackend"
 fi
 cp build/darwin/icons.icns "$app/Contents/Resources/icons.icns"
+mkdir -p "$app/Contents/Resources/agents"
+cp bin/native-build/agents/ideploy-agent-linux-* "$app/Contents/Resources/agents/"
 cp build/darwin/Info.plist "$app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable iDeployUI' "$app/Contents/Info.plist"
 xcrun actool --compile "$app/Contents/Resources" --platform macosx \

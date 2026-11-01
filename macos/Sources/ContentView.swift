@@ -5,6 +5,9 @@ struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openWindow) private var openWindow
     @State private var refreshing = false
+    private var showingRefresh: Bool {
+        refreshing || (model.section == .domains && model.domainDataLoading)
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -21,6 +24,7 @@ struct ContentView: View {
                         case .overview: OverviewPage()
                         case .deployments: DeploymentsPage()
                         case .servers: ServersPage()
+                        case .domains: DomainsPage()
                         case .projects: ProjectsPage()
                         case .registries: RegistriesPage()
                         case .databases: DatabasesPage()
@@ -164,14 +168,12 @@ struct ContentView: View {
             Button {
                 Task {
                     refreshing = true
-                    await model.refresh()
-                    // Keep the response visible even when the local request is very fast.
-                    try? await Task.sleep(nanoseconds: 1_600_000_000)
+                    await model.refreshFromUser()
                     refreshing = false
                 }
             } label: {
                 HStack(spacing: 8) {
-                    if refreshing {
+                    if showingRefresh {
                         ProgressView()
                             .controlSize(.small)
                             .frame(width: 14, height: 14)
@@ -180,12 +182,12 @@ struct ContentView: View {
                             .font(.system(size: 13, weight: .semibold))
                             .frame(width: 14, height: 14)
                     }
-                    Text(refreshing ? "刷新中…" : "刷新数据")
+                    Text(showingRefresh ? "刷新中…" : "刷新数据")
                 }
             }
             .buttonStyle(DeploySecondaryButtonStyle())
-            .help("重新获取项目、服务器、数据库和任务状态")
-            .disabled(model.busy || refreshing)
+            .help(model.section == .domains ? "刷新当前主域名的访问项和服务商 DNS 解析记录" : "重新获取项目、服务器、数据库和任务状态")
+            .disabled(model.busy || showingRefresh)
         }
         .padding(.horizontal, 30)
         .frame(height: 92)
@@ -195,11 +197,15 @@ struct ContentView: View {
 
 struct PageContainer<Content: View>: View {
     let content: Content
-    init(@ViewBuilder content: () -> Content) { self.content = content() }
+    let maxContentWidth: CGFloat
+    init(maxContentWidth: CGFloat = 1080, @ViewBuilder content: () -> Content) {
+        self.maxContentWidth = maxContentWidth
+        self.content = content()
+    }
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) { content }
-                .frame(maxWidth: 1080, alignment: .leading)
+                .frame(maxWidth: maxContentWidth, alignment: .leading)
                 .padding(30)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
         }
@@ -336,7 +342,7 @@ struct OverviewPage: View {
     @State private var selectedJob: J?
     private let panelHeight: CGFloat = 290
     var body: some View {
-        PageContainer {
+        PageContainer(maxContentWidth: .infinity) {
             SectionHeading("交付概况", "项目、部署、服务器、数据库和后台任务")
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(minimum: 150), spacing: 12), count: 3), spacing: 12) {
                 InfoTile(title: "项目", value: "\(model.projects.count)", symbol: "folder")

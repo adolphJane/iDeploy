@@ -152,17 +152,20 @@ func (s *Store) ClearAll(ctx context.Context) (ClearAllResult, error) {
 		}
 	}
 
-	rows, err := tx.QueryContext(ctx, "SELECT credential_ref FROM servers WHERE credential_ref <> ''")
+	rows, err := tx.QueryContext(ctx, "SELECT id, credential_ref FROM servers")
 	if err != nil {
 		return ClearAllResult{}, fmt.Errorf("list server credential references: %w", err)
 	}
 	for rows.Next() {
-		var ref string
-		if err := rows.Scan(&ref); err != nil {
+		var id, ref string
+		if err := rows.Scan(&id, &ref); err != nil {
 			rows.Close()
 			return ClearAllResult{}, fmt.Errorf("scan server credential reference: %w", err)
 		}
-		result.CredentialRefs = append(result.CredentialRefs, ref)
+		if ref != "" {
+			result.CredentialRefs = append(result.CredentialRefs, ref)
+		}
+		result.CredentialRefs = append(result.CredentialRefs, AgentPairingCredentialRef(id))
 	}
 	if err := rows.Close(); err != nil {
 		return ClearAllResult{}, err

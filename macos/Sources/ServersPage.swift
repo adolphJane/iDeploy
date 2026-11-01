@@ -15,7 +15,11 @@ struct ServersPage: View {
     @State private var loadedContainersID: String?
     @State private var containerLoadID = UUID()
     @State private var hostKey = J(nil)
+    @State private var agentStatus = J(nil)
+    @State private var loadingAgent = false
+    @State private var agentLoadID = UUID()
     @State private var deleteTarget: J?
+    @State private var agentUninstallTarget: J?
     @State private var logText = ""
     @State private var showingLogs = false
 
@@ -112,6 +116,66 @@ struct ServersPage: View {
                         Spacer()
                         Button("移除", role: .destructive) { deleteTarget = server }
                     }
+                    GroupBox("服务端 Agent") {
+                        VStack(alignment: .leading, spacing: 14) {
+                            HStack(spacing: 10) {
+                                Image(systemName: "server.rack")
+                                    .font(.system(size: 16, weight: .medium))
+                                    .foregroundStyle(DeployStyle.green)
+                                    .frame(width: 38, height: 38)
+                                    .background(DeployStyle.greenSoft, in: RoundedRectangle(cornerRadius: 10))
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(agentStatus["status"].string == "ready" ? "Agent 已连接" :
+                                         agentStatus.isNull ? (loadingAgent ? "正在读取 Agent 状态" : "Agent 状态未读取") : "Agent 尚未就绪")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(DeployStyle.ink)
+                                    if agentStatus["status"].string == "ready" {
+                                        Text("Linux \(agentStatus["hello"]["arch"].string) · 版本 \(String(agentStatus["hello"]["binarySHA256"].string.prefix(12)))\(agentStatus["updateAvailable"].bool ? " · 有可用更新" : " · 与当前应用一致")")
+                                            .font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
+                                    }
+                                }
+                                Spacer(minLength: 8)
+                                if loadingAgent { ProgressView().controlSize(.small).accessibilityLabel("正在刷新 Agent") }
+                            }
+                            if !loadingAgent && agentStatus["status"].string != "ready" {
+                                Text(agentStatus.isNull ? "无法读取状态，请检查服务器连接后刷新。" :
+                                     agentStatus["detail"].string.isEmpty ? "无法连接 Agent，请检查服务器连接或重新安装。" : agentStatus["detail"].string)
+                                    .font(.system(size: 11)).foregroundStyle(AppColors.warning)
+                                    .textSelection(.enabled)
+                            }
+                            if agentStatus["status"].string == "ready" {
+                                let metrics = agentStatus["metrics"]
+                                let cpu = metrics["cpu"]
+                                let memory = metrics["memory"]
+                                Rectangle().fill(DeployStyle.line).frame(height: 1)
+                                Text("服务器资源 · 采集于 \(metrics["observedAt"].string)")
+                                    .font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
+                                HStack(alignment: .top, spacing: 20) {
+                                    KeyValue(key: "CPU", value: "\(cpu["status"].string == "ok" ? String(format: "%.1f%%", (cpu["usagePercent"].raw as? NSNumber)?.doubleValue ?? 0) : cpu["status"].string) · \(cpu["logicalCores"].string) 核")
+                                    KeyValue(key: "内存", value: "\(ByteCountFormatter.string(fromByteCount: Int64(memory["usedBytes"].int), countStyle: .binary)) / \(ByteCountFormatter.string(fromByteCount: Int64(memory["totalBytes"].int), countStyle: .binary))")
+                                }
+                                ForEach(0..<metrics["storage"].array.count, id: \.self) { index in
+                                    let disk = metrics["storage"][index]
+                                    KeyValue(key: "存储", value: "\(disk["mountPoint"].string) · \(ByteCountFormatter.string(fromByteCount: Int64(disk["usedBytes"].int), countStyle: .binary)) / \(ByteCountFormatter.string(fromByteCount: Int64(disk["totalBytes"].int), countStyle: .binary))")
+                                }
+                            }
+                            Rectangle().fill(DeployStyle.line).frame(height: 1)
+                            HStack(spacing: 8) {
+                                Button("刷新状态") { loadAgent(server.id) }
+                                    .buttonStyle(DeploySecondaryButtonStyle())
+                                    .disabled(loadingAgent)
+                                Button("安装/修复") { Task { await model.perform("InstallServerAgent", [server.id]) } }
+                                    .buttonStyle(DeploySecondaryButtonStyle())
+                                Button("更新 Agent") { Task { await model.perform("UpdateServerAgent", [server.id]) } }
+                                    .buttonStyle(DeploySecondaryButtonStyle())
+                                Spacer(minLength: 0)
+                                Button("完全卸载", role: .destructive) { agentUninstallTarget = server }
+                                    .buttonStyle(DeploySecondaryButtonStyle())
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(6)
+                    }
                     if server["status"].string == "auth_required" {
                         GroupBox("SSH 主机指纹") {
                             VStack(alignment: .leading, spacing: 10) {
@@ -137,6 +201,49 @@ struct ServersPage: View {
                                 }
                             }.padding(6)
                         }
+                    }
+                    GroupBox("对外监听端口") {
+                        VStack(alignment: .leading, spacing: 9) {
+                            Text("当前绑定非回环地址的 TCP 端口；防火墙和公网可达性尚未验证。")
+                                .font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
+                            if !containers["portsError"].string.isEmpty {
+                                Text(containers["portsError"].string)
+                                    .font(.system(size: 11)).foregroundStyle(AppColors.warning).textSelection(.enabled)
+                            } else if containers.isNull || loadedContainersID != server.id {
+                                Text("刷新服务器数据后显示监听端口。")
+                                    .font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
+                            } else if containers["listeningPorts"].array.isEmpty {
+                                Text("未发现对外监听的 TCP 端口。")
+                                    .font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
+                            } else {
+                                ForEach(0..<containers["listeningPorts"].array.count, id: \.self) { index in
+                                    let item = containers["listeningPorts"][index]
+                                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                                        Text(":\(item["port"].string)/tcp")
+                                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                            .foregroundStyle(DeployStyle.green)
+                                            .frame(width: 90, alignment: .leading)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(item["service"].string.isEmpty ? "未识别服务" : item["service"].string)
+                                                .font(.system(size: 12, weight: .medium))
+                                            if !item["container"].string.isEmpty && item["container"].string != item["service"].string {
+                                                Text("容器：\(item["container"].string)")
+                                                    .font(.system(size: 10)).foregroundStyle(DeployStyle.muted)
+                                            }
+                                        }
+                                        Spacer(minLength: 8)
+                                        Text(item["bindAddresses"].array.map(\.string).joined(separator: ", "))
+                                            .font(.system(size: 10, design: .monospaced))
+                                            .foregroundStyle(DeployStyle.muted).textSelection(.enabled)
+                                    }
+                                    .padding(.vertical, 5)
+                                    .accessibilityElement(children: .combine)
+                                    if index < containers["listeningPorts"].array.count - 1 {
+                                        Rectangle().fill(DeployStyle.line).frame(height: 1)
+                                    }
+                                }
+                            }
+                        }.padding(6)
                     }
                     HStack {
                         SectionHeading("远程容器")
@@ -208,7 +315,10 @@ struct ServersPage: View {
                         }
                     }
                 }
-                .task(id: server.id) { loadContainers(server.id) }
+                .task(id: server.id) {
+                    loadContainers(server.id)
+                    loadAgent(server.id)
+                }
                 .groupBoxStyle(DeployGroupBoxStyle(fill: DeployStyle.overviewPanel))
             } else {
                 VStack(spacing: 12) {
@@ -236,6 +346,9 @@ struct ServersPage: View {
         }
         .onChange(of: selectedID) { _ in
             containers = J(nil)
+            agentStatus = J(nil)
+            loadingAgent = false
+            agentLoadID = UUID()
             hostKey = J(nil)
             loadedContainersID = nil
             loadingContainers = selectedID != nil
@@ -263,6 +376,22 @@ struct ServersPage: View {
                 }
             }
         }
+        .confirmationDialog("完全卸载服务端 Agent？", isPresented: Binding(
+            get: { agentUninstallTarget != nil },
+            set: { if !$0 { agentUninstallTarget = nil } }
+        )) {
+            Button("卸载 Agent", role: .destructive) {
+                guard let target = agentUninstallTarget else { return }
+                Task {
+                    if await model.perform("UninstallServerAgent", [target.id]) != nil {
+                        agentStatus = J(nil)
+                    }
+                    agentUninstallTarget = nil
+                }
+            }
+        } message: {
+            Text("将停止并移除 Agent、配对凭据、操作日志和 Agent 创建的续期任务；现有容器、Nginx 配置和证书保留。")
+        }
     }
 
     private func loadContainers(_ id: String) {
@@ -276,6 +405,19 @@ struct ServersPage: View {
             containers = nextContainers
             loadedContainersID = id
             loadingContainers = false
+        }
+    }
+
+    private func loadAgent(_ id: String) {
+        guard selectedID == id else { return }
+        let requestID = UUID()
+        agentLoadID = requestID
+        loadingAgent = true
+        Task {
+            let result = await model.perform("GetServerAgentStatus", [id], refreshAfter: false) ?? J(nil)
+            guard selectedID == id, agentLoadID == requestID else { return }
+            agentStatus = result
+            loadingAgent = false
         }
     }
 
@@ -442,7 +584,12 @@ struct ServerFormView: View {
                         ]
                         let result = await model.perform(server == nil ? "CreateServer" : "UpdateServer",
                                                          server == nil ? [input] : [server!.id, input])
-                        if result != nil { dismiss() }
+                        if let result {
+                            if server == nil {
+                                _ = await model.perform("InstallServerAgent", [result.id], refreshAfter: false)
+                            }
+                            dismiss()
+                        }
                     }
                 }
                 .buttonStyle(DeployPrimaryButtonStyle())

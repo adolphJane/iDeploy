@@ -11,6 +11,7 @@ struct DeploymentsPage: View {
     @State private var runtime = J(nil)
     @State private var releases: [J] = []
     @State private var environment = J(nil)
+    @State private var domainBindings: [J] = []
     @State private var loadingDetail = false
     @State private var loadedDetailID: String?
     @State private var detailLoadID = UUID()
@@ -143,6 +144,30 @@ struct DeploymentsPage: View {
                     }
                     VStack(alignment: .leading, spacing: 14) {
                         HStack {
+                            SectionHeading("域名与访问", "当前保存的域名目标")
+                            Spacer()
+                            Button("管理域名") { model.section = .domains }
+                                .buttonStyle(DeploySecondaryButtonStyle())
+                        }
+                        if domainBindings.isEmpty {
+                            Text("暂无域名绑定草稿。可前往域名页面选择根域名或子域名，配置此部署为目标。")
+                                .font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
+                        } else {
+                            ForEach(domainBindings, id: \.hostID) { item in
+                                HStack {
+                                    Text(item["fqdn"].string).font(.system(size: 12, weight: .semibold))
+                                    Spacer()
+                                    Text("容器端口 \(item["containerPort"].int) · \(item["status"].string == "active" ? "入口已应用" : item["status"].string == "draft" ? "草稿" : "处理中")")
+                                        .font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
+                                }
+                            }
+                        }
+                    }
+                    .padding(18)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .deployCard(fill: DeployStyle.overviewPanel)
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack {
                             SectionHeading("环境变量")
                             Spacer()
                             if environment["pendingApply"].bool {
@@ -256,6 +281,7 @@ struct DeploymentsPage: View {
             runtime = J(nil)
             releases = []
             environment = J(nil)
+            domainBindings = []
             loadedDetailID = nil
             loadingDetail = selectedID != nil
         }
@@ -314,10 +340,12 @@ struct DeploymentsPage: View {
             let nextRuntime = await model.perform("InspectDeploymentRuntime", [id], refreshAfter: false) ?? J(nil)
             let nextReleases = (await model.perform("ListDeploymentReleases", [id], refreshAfter: false) ?? J(nil)).array
             let nextEnvironment = await model.perform("ListDeploymentEnvironment", [id], refreshAfter: false) ?? J(nil)
+            let nextDomainBindings = (await model.perform("ListDeploymentDomains", [id], refreshAfter: false) ?? J(nil)).array
             guard selectedID == id, detailLoadID == requestID else { return }
             runtime = nextRuntime
             releases = nextReleases
             environment = nextEnvironment
+            domainBindings = nextDomainBindings
             loadedDetailID = id
             loadingDetail = false
         }
@@ -334,6 +362,7 @@ struct DeploymentsPage: View {
 
 private extension J {
     var selfName: String { self["name"].string }
+    var hostID: String { self["hostId"].string }
 }
 
 struct DeploymentFormView: View {

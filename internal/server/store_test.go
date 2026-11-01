@@ -56,8 +56,15 @@ func TestClearAllServerData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("clear server data: %v", err)
 	}
-	if cleared.Servers != 1 || cleared.Deployments != 1 || cleared.Snapshots != 1 || cleared.Jobs != 1 || len(cleared.CredentialRefs) != 1 {
+	if cleared.Servers != 1 || cleared.Deployments != 1 || cleared.Snapshots != 1 || cleared.Jobs != 1 || len(cleared.CredentialRefs) != 2 {
 		t.Fatalf("unexpected clear result: %#v", cleared)
+	}
+	refs := map[string]bool{}
+	for _, ref := range cleared.CredentialRefs {
+		refs[ref] = true
+	}
+	if !refs[server.PasswordCredentialRef("credential-1")] || !refs[server.AgentPairingCredentialRef(created.ID)] {
+		t.Fatalf("expected SSH and Agent Keychain refs, got %#v", cleared.CredentialRefs)
 	}
 	for _, table := range []string{"servers", "deployment_targets", "remote_snapshots"} {
 		var count int
