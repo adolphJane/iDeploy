@@ -6,11 +6,18 @@ private struct ProjectFormRequest: Identifiable {
     let project: J?
 }
 
+private struct ProjectFileRequest: Identifiable {
+    let id = UUID()
+    let project: J
+    let kind: String
+}
+
 struct ProjectsPage: View {
     @EnvironmentObject private var model: AppModel
     @State private var selectedID: String?
     @State private var formRequest: ProjectFormRequest?
     @State private var showingGenerator = false
+    @State private var fileRequest: ProjectFileRequest?
     @State private var gitStatus = J(nil)
     @State private var deleteTarget: J?
 
@@ -110,8 +117,14 @@ struct ProjectsPage: View {
                     }
                     ProjectDetailCard(title: "构建配置") {
                         ProjectDetailRow(key: "上下文", value: project["contextPath"].string)
-                        ProjectDetailRow(key: "Dockerfile", value: project["dockerfilePath"].string)
-                        ProjectDetailRow(key: "Compose", value: project["composePath"].string)
+                        ProjectFileRow(title: "Dockerfile", path: project["dockerfilePath"].string,
+                                       readOnly: project["sourceKind"].string == "git") {
+                            fileRequest = ProjectFileRequest(project: project, kind: "dockerfile")
+                        }
+                        ProjectFileRow(title: "Compose", path: project["composePath"].string,
+                                       readOnly: project["sourceKind"].string == "git") {
+                            fileRequest = ProjectFileRequest(project: project, kind: "compose")
+                        }
                         ProjectDetailRow(key: "镜像仓库", value: project["imageRepository"].string)
                     }
                     if !gitStatus.isNull {
@@ -158,6 +171,12 @@ struct ProjectsPage: View {
                     .environmentObject(model)
             }
         }
+        .sheet(item: $fileRequest) { request in
+            ProjectFileEditorView(project: request.project, kind: request.kind) {
+                Task { await model.refresh() }
+            }
+            .id(request.id)
+        }
         .confirmationDialog("移除项目？", isPresented: Binding(
             get: { deleteTarget != nil },
             set: { if !$0 { deleteTarget = nil } }
@@ -172,6 +191,30 @@ struct ProjectsPage: View {
             }
         } message: {
             Text("这会从 iDeploy 移除配置，不会删除源码。")
+        }
+    }
+}
+
+private struct ProjectFileRow: View {
+    let title: String
+    let path: String
+    let readOnly: Bool
+    let open: () -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 16) {
+            Text(title)
+                .font(.system(size: 12))
+                .foregroundStyle(DeployStyle.muted)
+                .frame(width: 82, alignment: .leading)
+            Text(path.isEmpty ? "未配置" : path)
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundStyle(DeployStyle.ink)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button(readOnly ? "查看" : "查看 / 编辑", action: open)
+                .buttonStyle(DeploySecondaryButtonStyle())
+                .disabled(path.isEmpty)
         }
     }
 }

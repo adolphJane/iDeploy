@@ -22,7 +22,7 @@ const (
 	mcpMaximumTimeout   = 24 * time.Hour
 )
 
-const mcpInstructions = `Use list tools to resolve project, server, deployment, registry, release, and job IDs before referencing existing resources. Project, deployment, deployment-environment, and build-proxy configuration tools only save local iDeploy configuration; they do not publish or change remote workloads. Supply a stable request_id for configuration writes and use get_operation after operation_pending or an uncertain local-control timeout. Run preflight_deployment before publishing. Publishing automatically uses the global build proxy policy returned by get_build_proxy_settings and blocks known host-port conflicts before building. Plain deployment environment variables may be managed through MCP; use request_deployment_secret_input for secrets so their values are entered in a local hidden-input dialog and never pass through MCP. A single-container restart recreates the container to apply current runtime configuration. Remote workload mutation tools must only be called after the user explicitly requests the exact action. retry_release safely rebuilds failures without an artifact and directly resumes deployment when an immutable pushed artifact was retained. Do not automatically retry other mutations after a timeout; inspect list_jobs or get_job first. Never request, expose, or return registry credentials, SSH credentials, deployment secrets, or Keychain values. Asynchronous operations require iDeploy.app to be running; otherwise use the default wait=true behavior.`
+const mcpInstructions = `Use list tools to resolve project, server, domain, deployment, registry, release, and job IDs before referencing existing resources. Project, deployment, deployment-environment, and build-proxy configuration tools only save local iDeploy configuration; they do not publish or change remote workloads. Supply a stable request_id for configuration writes and use get_operation after operation_pending or an uncertain local-control timeout. Run preflight_deployment before publishing; supply a unique request_id and call get_preflight_progress to observe a long-running check. Publishing automatically uses the global build proxy policy returned by get_build_proxy_settings and blocks known host-port conflicts before building. Plain deployment environment variables may be managed through MCP; use request_deployment_secret_input for secrets so their values are entered in a local hidden-input dialog and never pass through MCP. A single-container restart recreates the container to apply current runtime configuration. Remote workload and server Agent mutation tools must only be called after the user explicitly requests the exact action. retry_release safely rebuilds failures without an artifact and directly resumes deployment when an immutable pushed artifact was retained. Do not automatically retry other mutations after a timeout; inspect list_jobs or get_job first. Never request, expose, or return registry credentials, SSH credentials, deployment secrets, or Keychain values. Asynchronous operations require iDeploy.app to be running; otherwise use the default wait=true behavior.`
 
 type mcpRequestExecutor func(context.Context, cliRequest) cliResponse
 
@@ -36,8 +36,21 @@ type mcpOperationInput struct {
 	OperationID string `json:"operation_id" jsonschema:"request_id used by an idempotent configuration write"`
 }
 
+type mcpPreflightProgressInput struct {
+	RequestID string `json:"request_id" jsonschema:"progress key supplied to preflight_deployment"`
+}
+
 type mcpServerInput struct {
 	ServerID string `json:"server_id" jsonschema:"stable server identifier returned by list_servers"`
+}
+
+type mcpDomainInput struct {
+	DomainID string `json:"domain_id" jsonschema:"stable root-domain identifier returned by list_domains"`
+}
+
+type mcpAgentUninstallInput struct {
+	ServerID string `json:"server_id" jsonschema:"stable server identifier returned by list_servers"`
+	Confirm  bool   `json:"confirm" jsonschema:"must be true after the user explicitly requests complete Agent removal"`
 }
 
 type mcpContainerLogsInput struct {
@@ -161,6 +174,7 @@ type mcpDeploymentSecretPromptInput struct {
 type mcpPreflightDeploymentInput struct {
 	DeploymentID string `json:"deployment_id" jsonschema:"stable deployment identifier returned by list_deployments"`
 	RegistryID   string `json:"registry_id" jsonschema:"registry identifier intended for the next publish"`
+	RequestID    string `json:"request_id,omitempty" jsonschema:"optional unique progress key; pass to get_preflight_progress while the check runs"`
 }
 
 type mcpJobInput struct {
@@ -276,6 +290,41 @@ func registerMCPReadTools(server *mcp.Server, service *mcpService) {
 	}, mcpReadTimeout, listRequest("server.list"), "Listed iDeploy servers.")
 
 	registerMCPCommandTool(server, service, &mcp.Tool{
+		Name: "get_server_agent_status", Description: "Read the server Agent connection state, version, CPU, memory, and storage metrics. Credentials are never returned.",
+		Annotations: mcpReadAnnotations("Get server Agent status", true),
+	}, time.Minute, func(input mcpServerInput) (cliRequest, error) {
+		if err := requireMCPValue("server_id", input.ServerID); err != nil {
+			return cliRequest{}, err
+		}
+		return cliRequest{Command: "server.agent.status", ID: strings.TrimSpace(input.ServerID)}, nil
+	}, "Returned the server Agent status.")
+
+	registerMCPCommandTool(server, service, &mcp.Tool{
+		Name: "list_domains", Description: "List root domains configured in iDeploy and their stable IDs.",
+		Annotations: mcpReadAnnotations("List domains", false),
+	}, mcpReadTimeout, listRequest("domain.list"), "Listed iDeploy domains.")
+
+	registerMCPCommandTool(server, service, &mcp.Tool{
+		Name: "list_domain_hosts", Description: "List locally managed domain hosts and binding drafts for a root domain.",
+		Annotations: mcpReadAnnotations("List domain hosts", false),
+	}, mcpReadTimeout, func(input mcpDomainInput) (cliRequest, error) {
+		if err := requireMCPValue("domain_id", input.DomainID); err != nil {
+			return cliRequest{}, err
+		}
+		return cliRequest{Command: "domain.host.list", ID: strings.TrimSpace(input.DomainID)}, nil
+	}, "Listed domain hosts.")
+
+	registerMCPCommandTool(server, service, &mcp.Tool{
+		Name: "list_dns_records", Description: "Read current DNS records from the configured provider for a root domain. This refreshes provider data but does not change records.",
+		Annotations: mcpReadAnnotations("List DNS records", true),
+	}, time.Minute, func(input mcpDomainInput) (cliRequest, error) {
+		if err := requireMCPValue("domain_id", input.DomainID); err != nil {
+			return cliRequest{}, err
+		}
+		return cliRequest{Command: "domain.dns-record.list", ID: strings.TrimSpace(input.DomainID)}, nil
+	}, "Listed provider DNS records.")
+
+	registerMCPCommandTool(server, service, &mcp.Tool{
 		Name: "list_remote_containers", Description: "Refresh and list Docker containers on an existing iDeploy server. Credentials are never returned.",
 		Annotations: mcpReadAnnotations("List remote containers", true),
 	}, mcpReadTimeout, func(input mcpServerInput) (cliRequest, error) {
@@ -352,15 +401,25 @@ func registerMCPReadTools(server *mcp.Server, service *mcpService) {
 	registerMCPCommandTool(server, service, &mcp.Tool{
 		Name: "preflight_deployment", Description: "Validate source files, base-image manifests through the configured build proxy, registry credentials, target Docker connectivity and architecture, remote workload name, and host-port availability before publishing. This reads external systems but does not deploy anything.",
 		Annotations: mcpReadAnnotations("Preflight deployment", true),
-	}, 2*time.Minute, func(input mcpPreflightDeploymentInput) (cliRequest, error) {
+	}, 3*time.Minute, func(input mcpPreflightDeploymentInput) (cliRequest, error) {
 		if err := requireMCPValue("deployment_id", input.DeploymentID); err != nil {
 			return cliRequest{}, err
 		}
 		if err := requireMCPValue("registry_id", input.RegistryID); err != nil {
 			return cliRequest{}, err
 		}
-		return cliRequest{Command: "deployment.preflight", ID: strings.TrimSpace(input.DeploymentID), RegistryID: strings.TrimSpace(input.RegistryID)}, nil
+		return cliRequest{Command: "deployment.preflight", ID: strings.TrimSpace(input.DeploymentID), RegistryID: strings.TrimSpace(input.RegistryID), RequestID: strings.TrimSpace(input.RequestID)}, nil
 	}, "Completed deployment preflight checks.")
+
+	registerMCPCommandTool(server, service, &mcp.Tool{
+		Name: "get_preflight_progress", Description: "Read the current stage and completed checks of a running deployment preflight by its request_id. Progress is retained briefly after completion.",
+		Annotations: mcpReadAnnotations("Get preflight progress", false),
+	}, mcpReadTimeout, func(input mcpPreflightProgressInput) (cliRequest, error) {
+		if err := requireMCPValue("request_id", input.RequestID); err != nil {
+			return cliRequest{}, err
+		}
+		return cliRequest{Command: "deployment.preflight.progress", ID: strings.TrimSpace(input.RequestID)}, nil
+	}, "Returned deployment preflight progress.")
 
 	registerMCPCommandTool(server, service, &mcp.Tool{
 		Name: "inspect_deployment_runtime", Description: "Refresh and return the remote containers, image, ports, state, and health matched to one deployment configuration.",
@@ -423,6 +482,33 @@ func registerMCPReadTools(server *mcp.Server, service *mcpService) {
 }
 
 func registerMCPMutationTools(server *mcp.Server, service *mcpService) {
+	for _, operation := range []struct{ name, command, title string }{
+		{"install_server_agent", "server.agent.install", "Install or repair server Agent"},
+		{"update_server_agent", "server.agent.update", "Update server Agent"},
+	} {
+		registerMCPCommandTool(server, service, &mcp.Tool{
+			Name: operation.name, Description: operation.title + " on the selected remote server. Returns a job ID for get_job or wait_job. Call only after the user explicitly requests this server operation.",
+			Annotations: mcpMutationAnnotations(operation.title),
+		}, mcpReadTimeout, func(input mcpServerInput) (cliRequest, error) {
+			if err := requireMCPValue("server_id", input.ServerID); err != nil {
+				return cliRequest{}, err
+			}
+			return cliRequest{Command: operation.command, ID: strings.TrimSpace(input.ServerID)}, nil
+		}, operation.title+" queued.")
+	}
+	registerMCPCommandTool(server, service, &mcp.Tool{
+		Name: "uninstall_server_agent", Description: "Completely remove the Agent from a remote server, including its local pairing credential. Existing containers and certificates remain. Requires explicit user confirmation and returns a job ID.",
+		Annotations: mcpMutationAnnotations("Uninstall server Agent"),
+	}, mcpReadTimeout, func(input mcpAgentUninstallInput) (cliRequest, error) {
+		if err := requireMCPValue("server_id", input.ServerID); err != nil {
+			return cliRequest{}, err
+		}
+		if !input.Confirm {
+			return cliRequest{}, errors.New("confirm=true is required to uninstall the server Agent")
+		}
+		return cliRequest{Command: "server.agent.uninstall", ID: strings.TrimSpace(input.ServerID)}, nil
+	}, "Server Agent uninstall queued.")
+
 	registerMCPCommandTool(server, service, &mcp.Tool{
 		Name: "configure_build_proxy", Description: "Configure the global iDeploy BuildKit proxy policy used automatically by future MCP and desktop publishing. Rules map upstream registry hosts to proxy cache paths. This writes local configuration and does not start a build or change a remote workload.",
 		Annotations: mcpConfigurationAnnotations("Configure build proxy"),

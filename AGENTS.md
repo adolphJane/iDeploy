@@ -28,7 +28,7 @@
 - Go 逻辑改动运行相关包测试；跨模块改动或提交前运行 `go test -tags native ./...`。
 - SwiftUI 或原生桥接改动在 macOS 上运行 `bash build/darwin/build-native.sh build`，确认 Go 后台和 SwiftUI 都编译成功。需要检查完整应用包时运行 `bash build/darwin/build-native.sh package`，产物为 `bin/iDeploy.app`；`universal` 模式会额外构建 Intel 架构。
 - `bin/` 是生成目录，不提交。纯文档改动无需构建应用；报告验证结果时区分已执行的命令和未执行的检查。
-- `.github/workflows/ci.yml` 当前运行 Go 测试和原生 macOS 构建；原生应用由 `.github/workflows/release.yml` 在版本标签或手动触发时构建。发布脚本位于 `build/darwin/release.sh`，不要用本地构建成功代替发布产物或 Actions 结果的核验。
+- `.github/workflows/ci.yml` 当前运行 Go 测试和原生 macOS 构建；原生应用由 `.github/workflows/release.yml` 在版本标签或手动触发时构建。发布脚本位于 `build/darwin/release.sh`。推送代码或 tag 后，不轮询或等待 GitHub Actions；只报告推送结果，用户需要时会自行查看 Actions 和发布产物。
 
 ## 发布与外部操作
 

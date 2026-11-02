@@ -232,6 +232,20 @@ func executeCLIRequest(ctx context.Context, service *SystemService, request cliR
 		value, err = service.GetContainerLogs(ContainerLogsInput{ServerID: request.ID, ContainerID: request.ContainerID, Tail: request.Tail})
 	case "server.port.check":
 		value, err = service.CheckPortAvailability(PortAvailabilityInput{ServerID: request.ID, Ports: request.Ports})
+	case "server.agent.status":
+		value, err = service.GetServerAgentStatus(request.ID)
+	case "server.agent.install":
+		value, err = service.InstallServerAgent(request.ID)
+	case "server.agent.update":
+		value, err = service.UpdateServerAgent(request.ID)
+	case "server.agent.uninstall":
+		value, err = service.UninstallServerAgent(request.ID)
+	case "domain.list":
+		value, err = service.ListDomains()
+	case "domain.host.list":
+		value, err = service.ListDomainHosts(request.ID)
+	case "domain.dns-record.list":
+		value, err = service.ListDNSRecords(request.ID)
 	case "registry.list":
 		value, err = service.ListRegistries()
 	case "build-proxy.get":
@@ -268,7 +282,9 @@ func executeCLIRequest(ctx context.Context, service *SystemService, request cliR
 	case "deployment.get":
 		value, err = findDeployment(service, request.ID)
 	case "deployment.preflight":
-		value, err = service.PreflightDeployment(DeploymentPreflightInput{DeploymentID: request.ID, RegistryID: request.RegistryID})
+		value, err = service.PreflightDeployment(DeploymentPreflightInput{DeploymentID: request.ID, RegistryID: request.RegistryID, RequestID: request.RequestID})
+	case "deployment.preflight.progress":
+		value, err = service.GetPreflightProgress(request.ID)
 	case "deployment.runtime":
 		value, err = service.InspectDeploymentRuntime(request.ID)
 	case "deployment.environment.list":

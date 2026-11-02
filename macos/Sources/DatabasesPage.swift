@@ -265,7 +265,7 @@ struct DatabasesPage: View {
                         }
                     }
                     .labelsHidden()
-                    .frame(maxWidth: .infinity)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .onChange(of: schema) { _ in loadTables(connection.id) }
                     Rectangle().fill(DeployStyle.line).frame(height: 1)
                     ScrollView(.vertical, showsIndicators: false) {

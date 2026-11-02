@@ -18,6 +18,9 @@ func init() {
 		nativeMethods[name] = true
 	}
 	nativeMethods["GetServerAgentStatus"] = true
+	nativeMethods["GetPreflightProgress"] = true
+	nativeMethods["ReadProjectFile"] = true
+	nativeMethods["SaveProjectFile"] = true
 	nativeMethods["CheckServerCertificate"] = true
 	nativeMethods["IssueServerCertificate"] = true
 	nativeMethods["RenewServerCertificates"] = true

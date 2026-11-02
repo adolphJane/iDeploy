@@ -19,6 +19,30 @@ func TestMirroredBaseImageReference(t *testing.T) {
 	}
 }
 
+func TestFilterInspectableBaseImagesDeduplicatesStages(t *testing.T) {
+	images := []string{"harbor.example.com/proxy/node:22-alpine", "harbor.example.com/proxy/node:22-alpine", "scratch", "${BASE_IMAGE}", "alpine:3.21"}
+	want := []string{"harbor.example.com/proxy/node:22-alpine", "alpine:3.21"}
+	if got := filterInspectableBaseImages(images); !reflect.DeepEqual(got, want) {
+		t.Fatalf("inspectable images = %#v, want %#v", got, want)
+	}
+}
+
+func TestPreflightProgressTracksCurrentStageAndCopiesChecks(t *testing.T) {
+	service := NewSystemService()
+	checks := []DeploymentPreflightCheckView{{ID: "source", Status: "ok", Detail: "源码可用"}}
+	service.setPreflightProgress("request-1", 3, "正在检查基础镜像（0/1）", checks, false)
+	checks[0].Detail = "已修改"
+	progress, err := service.GetPreflightProgress("request-1")
+	if err != nil || progress.Stage != 3 || progress.Total != 5 || progress.Completed || progress.Checks[0].Detail != "源码可用" {
+		t.Fatalf("unexpected progress: %#v, %v", progress, err)
+	}
+	service.setPreflightProgress("request-1", 5, "检查已结束", progress.Checks, true)
+	progress, err = service.GetPreflightProgress("request-1")
+	if err != nil || !progress.Completed || progress.Stage != 5 {
+		t.Fatalf("unexpected completed progress: %#v, %v", progress, err)
+	}
+}
+
 func TestPreflightPortParsingAndSuggestions(t *testing.T) {
 	if got, want := requestedHostPorts([]string{"8080:3000", "127.0.0.1:8443:443/tcp"}), []int{8080, 8443}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("requested ports = %#v, want %#v", got, want)

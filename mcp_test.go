@@ -22,6 +22,44 @@ func TestMCPCommandSelection(t *testing.T) {
 	}
 }
 
+func TestMCPDomainAgentAndPreflightProgressMappings(t *testing.T) {
+	requests := make(chan cliRequest, 8)
+	client, closeSessions := connectMCPTestClient(t, func(_ context.Context, request cliRequest) cliResponse {
+		requests <- request
+		return cliResponseFromValue(map[string]any{"ok": true})
+	})
+	defer closeSessions()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for _, call := range []struct {
+		name        string
+		args        map[string]any
+		command, id string
+	}{
+		{"get_server_agent_status", map[string]any{"server_id": "srv-1"}, "server.agent.status", "srv-1"},
+		{"list_domains", map[string]any{}, "domain.list", ""},
+		{"list_domain_hosts", map[string]any{"domain_id": "dom-1"}, "domain.host.list", "dom-1"},
+		{"list_dns_records", map[string]any{"domain_id": "dom-1"}, "domain.dns-record.list", "dom-1"},
+		{"install_server_agent", map[string]any{"server_id": "srv-1"}, "server.agent.install", "srv-1"},
+		{"update_server_agent", map[string]any{"server_id": "srv-1"}, "server.agent.update", "srv-1"},
+		{"uninstall_server_agent", map[string]any{"server_id": "srv-1", "confirm": true}, "server.agent.uninstall", "srv-1"},
+		{"get_preflight_progress", map[string]any{"request_id": "check-1"}, "deployment.preflight.progress", "check-1"},
+	} {
+		result, err := client.CallTool(ctx, &mcp.CallToolParams{Name: call.name, Arguments: call.args})
+		if err != nil || result.IsError {
+			t.Fatalf("%s failed: result=%#v err=%v", call.name, result, err)
+		}
+		request := <-requests
+		if request.Command != call.command || request.ID != call.id {
+			t.Fatalf("%s mapped to %#v", call.name, request)
+		}
+	}
+	result, err := client.CallTool(ctx, &mcp.CallToolParams{Name: "uninstall_server_agent", Arguments: map[string]any{"server_id": "srv-1"}})
+	if err != nil || !result.IsError {
+		t.Fatalf("unconfirmed Agent removal should fail: result=%#v err=%v", result, err)
+	}
+}
+
 func TestMCPListsExpectedTools(t *testing.T) {
 	client, closeSessions := connectMCPTestClient(t, func(_ context.Context, request cliRequest) cliResponse {
 		return cliResponseFromValue(map[string]any{"command": request.Command})
@@ -37,10 +75,12 @@ func TestMCPListsExpectedTools(t *testing.T) {
 
 	expected := map[string]bool{
 		"get_version": false, "doctor": false, "list_projects": false, "validate_project": false, "create_project": false, "update_project": false, "delete_project": false,
-		"list_servers": false, "list_remote_containers": false, "get_container_logs": false, "check_port_availability": false,
+		"list_servers": false, "get_server_agent_status": false, "install_server_agent": false, "update_server_agent": false, "uninstall_server_agent": false,
+		"list_domains": false, "list_domain_hosts": false, "list_dns_records": false,
+		"list_remote_containers": false, "get_container_logs": false, "check_port_availability": false,
 		"list_registries": false, "get_build_proxy_settings": false, "configure_build_proxy": false,
 		"get_operation": false, "list_deployments": false, "list_deployment_environment": false,
-		"create_deployment": false, "update_deployment": false, "clone_deployment": false, "delete_deployment": false, "get_deployment": false, "preflight_deployment": false, "inspect_deployment_runtime": false, "list_releases": false, "list_jobs": false,
+		"create_deployment": false, "update_deployment": false, "clone_deployment": false, "delete_deployment": false, "get_deployment": false, "preflight_deployment": false, "get_preflight_progress": false, "inspect_deployment_runtime": false, "list_releases": false, "list_jobs": false,
 		"update_deployment_environment": false, "request_deployment_secret_input": false,
 		"get_job": false, "wait_job": false, "publish_deployment": false,
 		"rollback_deployment": false, "retry_release": false, "start_deployment": false,
@@ -142,14 +182,14 @@ func TestMCPPreflightAndRetryMapArguments(t *testing.T) {
 	defer closeSessions()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if result, err := client.CallTool(ctx, &mcp.CallToolParams{Name: "preflight_deployment", Arguments: map[string]any{"deployment_id": "deployment-1", "registry_id": "registry-1"}}); err != nil || result.IsError {
+	if result, err := client.CallTool(ctx, &mcp.CallToolParams{Name: "preflight_deployment", Arguments: map[string]any{"deployment_id": "deployment-1", "registry_id": "registry-1", "request_id": "preflight-001"}}); err != nil || result.IsError {
 		t.Fatalf("preflight failed: result=%#v err=%v", result, err)
 	}
 	if result, err := client.CallTool(ctx, &mcp.CallToolParams{Name: "retry_release", Arguments: map[string]any{"release_id": "release-1", "wait": false}}); err != nil || result.IsError {
 		t.Fatalf("retry failed: result=%#v err=%v", result, err)
 	}
 	preflight, retry := <-requests, <-requests
-	if preflight.Command != "deployment.preflight" || preflight.ID != "deployment-1" || preflight.RegistryID != "registry-1" {
+	if preflight.Command != "deployment.preflight" || preflight.ID != "deployment-1" || preflight.RegistryID != "registry-1" || preflight.RequestID != "preflight-001" {
 		t.Fatalf("unexpected preflight mapping: %#v", preflight)
 	}
 	if retry.Command != "release.retry" || retry.ReleaseID != "release-1" || retry.Wait {

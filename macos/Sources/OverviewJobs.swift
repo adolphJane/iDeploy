@@ -241,7 +241,13 @@ struct JobDetailSheet: View {
         .padding(24)
         .frame(width: 560, height: 560)
         .background(DeployStyle.canvas)
-        .task { await reload() }
+        .task {
+            while !Task.isCancelled {
+                await reload()
+                if !["queued", "running"].contains(current["status"].string) { break }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
     }
 
     private func detailRow(_ label: String, _ value: String) -> some View {

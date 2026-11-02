@@ -32,13 +32,13 @@ enum NativeBridge {
     static let socketPath = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/iDeploy/control.sock").path
 
-    static func call(_ name: String, _ arguments: [Any] = []) async throws -> J {
+    static func call(_ name: String, _ arguments: [Any] = [], timeoutSeconds: Int = 300) async throws -> J {
         try await Task.detached(priority: .userInitiated) {
-            try request(name, arguments)
+            try request(name, arguments, timeoutSeconds: timeoutSeconds)
         }.value
     }
 
-    private static func request(_ name: String, _ arguments: [Any]) throws -> J {
+    private static func request(_ name: String, _ arguments: [Any], timeoutSeconds: Int) throws -> J {
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw BridgeError(message: "无法创建本机连接") }
         defer { Darwin.close(fd) }
@@ -60,7 +60,7 @@ enum NativeBridge {
         guard connected == 0 else {
             throw BridgeError(message: "无法连接 iDeploy 后台服务")
         }
-        var timeout = timeval(tv_sec: 300, tv_usec: 0)
+        var timeout = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         let payload: [String: Any] = [
             "command": "native.call",
@@ -82,7 +82,12 @@ enum NativeBridge {
         var chunk = [UInt8](repeating: 0, count: 8192)
         while response.count < 16 * 1024 * 1024 {
             let count = Darwin.read(fd, &chunk, chunk.count)
-            guard count > 0 else { throw BridgeError(message: "后台服务没有响应") }
+            guard count > 0 else {
+                if count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    throw BridgeError(message: "后台操作超时，请检查网络或服务器连接后重试")
+                }
+                throw BridgeError(message: "后台服务没有响应")
+            }
             response.append(contentsOf: chunk.prefix(count))
             if chunk.prefix(count).contains(0x0A) { break }
         }

@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"ideploy/internal/deployment"
@@ -21,6 +23,7 @@ import (
 type DeploymentPreflightInput struct {
 	DeploymentID string `json:"deploymentId"`
 	RegistryID   string `json:"registryId"`
+	RequestID    string `json:"requestId,omitempty"`
 }
 
 type DeploymentPreflightCheckView struct {
@@ -37,6 +40,55 @@ type DeploymentPreflightView struct {
 	SuggestedPorts []int                          `json:"suggestedPorts"`
 }
 
+type DeploymentPreflightProgressView struct {
+	Stage     int                            `json:"stage"`
+	Total     int                            `json:"total"`
+	Detail    string                         `json:"detail"`
+	Checks    []DeploymentPreflightCheckView `json:"checks"`
+	Completed bool                           `json:"completed"`
+}
+
+type preflightProgressEntry struct {
+	view      DeploymentPreflightProgressView
+	updatedAt time.Time
+}
+
+func (s *SystemService) GetPreflightProgress(requestID string) (DeploymentPreflightProgressView, error) {
+	if strings.TrimSpace(requestID) == "" {
+		return DeploymentPreflightProgressView{}, errors.New("request_id is required")
+	}
+	s.preflightMu.RLock()
+	entry, found := s.preflightProgress[requestID]
+	s.preflightMu.RUnlock()
+	if !found {
+		return DeploymentPreflightProgressView{}, nil
+	}
+	return entry.view, nil
+}
+
+func (s *SystemService) setPreflightProgress(requestID string, stage int, detail string, checks []DeploymentPreflightCheckView, completed bool) {
+	if requestID == "" {
+		return
+	}
+	s.preflightMu.Lock()
+	defer s.preflightMu.Unlock()
+	if s.preflightProgress == nil {
+		s.preflightProgress = make(map[string]preflightProgressEntry)
+	}
+	for id, entry := range s.preflightProgress {
+		if time.Since(entry.updatedAt) > 10*time.Minute {
+			delete(s.preflightProgress, id)
+		}
+	}
+	s.preflightProgress[requestID] = preflightProgressEntry{
+		view: DeploymentPreflightProgressView{
+			Stage: stage, Total: 5, Detail: detail,
+			Checks: append([]DeploymentPreflightCheckView{}, checks...), Completed: completed,
+		},
+		updatedAt: time.Now(),
+	}
+}
+
 var publishedPortPattern = regexp.MustCompile(`([0-9]{1,5})->`)
 
 func (s *SystemService) PreflightDeployment(input DeploymentPreflightInput) (DeploymentPreflightView, error) {
@@ -45,6 +97,15 @@ func (s *SystemService) PreflightDeployment(input DeploymentPreflightInput) (Dep
 	if input.DeploymentID == "" || input.RegistryID == "" {
 		return DeploymentPreflightView{}, errors.New("deployment_id and registry_id are required")
 	}
+	stageIndex, stageDetail := 1, "正在读取部署配置与项目源码"
+	checks := []DeploymentPreflightCheckView{}
+	updateProgress := func() { s.setPreflightProgress(input.RequestID, stageIndex, stageDetail, checks, false) }
+	setStage := func(index int, detail string) {
+		stageIndex, stageDetail = index, detail
+		updateProgress()
+	}
+	updateProgress()
+	defer func() { s.setPreflightProgress(input.RequestID, stageIndex, "检查已结束", checks, true) }()
 	deployments, err := s.deploymentStore()
 	if err != nil {
 		return DeploymentPreflightView{}, err
@@ -61,7 +122,7 @@ func (s *SystemService) PreflightDeployment(input DeploymentPreflightInput) (Dep
 	if err != nil {
 		return DeploymentPreflightView{}, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	target, err := deployments.Get(ctx, input.DeploymentID)
 	if err != nil {
@@ -83,6 +144,8 @@ func (s *SystemService) PreflightDeployment(input DeploymentPreflightInput) (Dep
 	view := DeploymentPreflightView{OK: true, DeploymentID: target.ID, Checks: []DeploymentPreflightCheckView{}, BaseImages: []string{}, SuggestedPorts: []int{}}
 	add := func(id, status, detail string) {
 		view.Checks = append(view.Checks, DeploymentPreflightCheckView{ID: id, Status: status, Detail: detail})
+		checks = view.Checks
+		updateProgress()
 		if status == "failed" {
 			view.OK = false
 		}
@@ -128,6 +191,7 @@ func (s *SystemService) PreflightDeployment(input DeploymentPreflightInput) (Dep
 		}
 	}
 
+	setStage(2, "正在检查发布仓库和构建代理")
 	if registryValue.Status != registry.StatusHealthy {
 		add("registry_push", "failed", "发布仓库尚未通过登录测试")
 	} else if _, credentialErr := loadRegistryPushPassword(ctx, registryValue); credentialErr != nil {
@@ -149,19 +213,46 @@ func (s *SystemService) PreflightDeployment(input DeploymentPreflightInput) (Dep
 		add("build_proxy", "ok", fmt.Sprintf("%s 模式，%d 条代理规则", proxySettings.Mode, len(proxySettings.Rules)))
 	}
 
+	setStage(3, fmt.Sprintf("正在检查基础镜像（0/%d）", len(view.BaseImages)))
 	if len(view.BaseImages) > 0 {
 		docker, dockerErr := toolchain.ResolveExecutable(ctx, "docker")
 		if dockerErr != nil {
 			add("base_images", "failed", dockerErr.Error())
 		} else {
+			// Network checks are independent. Keep their output order stable while
+			// preventing one slow registry from delaying every subsequent image.
+			failuresByImage := make([]string, len(view.BaseImages))
+			var workers sync.WaitGroup
+			var inspected atomic.Int32
+			limit := make(chan struct{}, 4)
+			for index, image := range view.BaseImages {
+				workers.Add(1)
+				go func(index int, image string) {
+					defer workers.Done()
+					limit <- struct{}{}
+					defer func() { <-limit }()
+					reference := mirroredBaseImageReference(image, proxySettings.Rules)
+					inspectContext, inspectCancel := context.WithTimeout(ctx, 150*time.Second)
+					defer inspectCancel()
+					if _, inspectErr := runLocalCommand(inspectContext, root, nil, docker.Path, "manifest", "inspect", reference); inspectErr != nil {
+						detail := compactCommandError(inspectErr)
+						if errors.Is(inspectContext.Err(), context.DeadlineExceeded) {
+							detail = "镜像查询超过 150 秒；请检查本机到镜像仓库的网络、仓库响应速度或代理配置"
+						} else if errors.Is(inspectContext.Err(), context.Canceled) {
+							detail = "发布前检查已超时，请重试"
+						}
+						failuresByImage[index] = image + " via " + reference + ": " + detail
+					}
+					completed := inspected.Add(1)
+					s.setPreflightProgress(input.RequestID, 3,
+						fmt.Sprintf("正在检查基础镜像（%d/%d）", completed, len(view.BaseImages)), checks, false)
+				}(index, image)
+			}
+			workers.Wait()
 			failures := make([]string, 0)
-			for _, image := range view.BaseImages {
-				reference := mirroredBaseImageReference(image, proxySettings.Rules)
-				inspectContext, inspectCancel := context.WithTimeout(ctx, 20*time.Second)
-				_, inspectErr := runLocalCommand(inspectContext, root, nil, docker.Path, "manifest", "inspect", reference)
-				inspectCancel()
-				if inspectErr != nil {
-					failures = append(failures, image+" via "+reference+": "+compactCommandError(inspectErr))
+			for _, failure := range failuresByImage {
+				if failure != "" {
+					failures = append(failures, failure)
 				}
 			}
 			if len(failures) > 0 {
@@ -172,6 +263,7 @@ func (s *SystemService) PreflightDeployment(input DeploymentPreflightInput) (Dep
 		}
 	}
 
+	setStage(4, "正在检查运行环境变量")
 	if target.WorkloadKind == "container" {
 		environmentVariables, environmentErr := deployments.ListEnvironment(ctx, target.ID)
 		if environmentErr != nil {
@@ -198,6 +290,7 @@ func (s *SystemService) PreflightDeployment(input DeploymentPreflightInput) (Dep
 		add("environment", "warning", "当前版本暂未管理 Compose 环境变量")
 	}
 
+	setStage(5, "正在连接目标服务器并检查 Docker")
 	remote := server.NewRemote()
 	probe := remote.Probe(ctx, host)
 	if probe.Status != server.StatusHealthy {
@@ -205,12 +298,14 @@ func (s *SystemService) PreflightDeployment(input DeploymentPreflightInput) (Dep
 		return view, nil
 	}
 	add("server_connection", "ok", probe.Detail)
+	setStage(5, "正在读取目标 Docker 平台")
 	platform, platformErr := remote.DockerPlatform(ctx, host)
 	if platformErr != nil {
 		add("platform", "failed", platformErr.Error())
 	} else {
 		add("platform", "ok", "目标 Docker 平台: "+platform)
 	}
+	setStage(5, "正在读取远程容器与端口")
 	containers, containersErr := remote.ListContainers(ctx, host)
 	if containersErr != nil {
 		add("remote_runtime", "failed", containersErr.Error())
@@ -261,10 +356,12 @@ func (discardJobReporter) Log(string)           {}
 
 func filterInspectableBaseImages(images []string) []string {
 	result := make([]string, 0, len(images))
+	seen := make(map[string]bool, len(images))
 	for _, image := range images {
-		if image == "" || image == "scratch" || strings.Contains(image, "$") {
+		if image == "" || image == "scratch" || strings.Contains(image, "$") || seen[image] {
 			continue
 		}
+		seen[image] = true
 		result = append(result, image)
 		if len(result) == 8 {
 			break

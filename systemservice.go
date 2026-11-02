@@ -402,7 +402,9 @@ type DeploymentView struct {
 // SystemService owns Phase 0 application infrastructure and exposes a narrow,
 // typed interface to the native UI, CLI, and MCP.
 type SystemService struct {
-	mu sync.RWMutex
+	mu                sync.RWMutex
+	preflightMu       sync.RWMutex
+	preflightProgress map[string]preflightProgressEntry
 
 	db             *sql.DB
 	store          *job.Store

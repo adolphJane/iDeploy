@@ -7,8 +7,25 @@ private struct DomainFormShell<Content: View>: View {
     let subtitle: String
     let saveTitle: String
     let canSave: Bool
+    let width: CGFloat
+    let height: CGFloat
+    let cancelTitle: String
     let save: () -> Void
     @ViewBuilder let content: Content
+
+    init(title: String, subtitle: String, saveTitle: String, canSave: Bool,
+         width: CGFloat = 580, height: CGFloat = 440, cancelTitle: String = "取消",
+         save: @escaping () -> Void, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.subtitle = subtitle
+        self.saveTitle = saveTitle
+        self.canSave = canSave
+        self.width = width
+        self.height = height
+        self.cancelTitle = cancelTitle
+        self.save = save
+        self.content = content()
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,12 +47,12 @@ private struct DomainFormShell<Content: View>: View {
             Rectangle().fill(DeployStyle.line).frame(height: 1)
             HStack {
                 Spacer()
-                Button("取消") { dismiss() }.buttonStyle(DeploySecondaryButtonStyle()).keyboardShortcut(.cancelAction)
+                Button(cancelTitle) { dismiss() }.buttonStyle(DeploySecondaryButtonStyle()).keyboardShortcut(.cancelAction)
                 Button(saveTitle, action: save).buttonStyle(DeployPrimaryButtonStyle())
                     .keyboardShortcut(.defaultAction).disabled(!canSave)
             }.padding(20).background(DeployStyle.overviewPanel)
         }
-        .frame(width: 580, height: 440)
+        .frame(width: width, height: height)
         .environment(\.colorScheme, .light)
     }
 }
@@ -687,23 +704,34 @@ struct DNSRecordBindingView: View {
     @State private var host: J?
     @State private var errorMessage: String?
     @State private var targetMode = "deployment"
+    @State private var resolving = false
 
     var body: some View {
         Group {
             if let host {
                 VStack(spacing: 0) {
-                    if host["binding"].isNull && host["externalRoute"].isNull {
-                        Picker("服务来源", selection: $targetMode) {
-                            Text("iDeploy 部署").tag("deployment")
-                            Text("服务器现有服务").tag("server")
-                        }.pickerStyle(.segmented).padding(16).background(DeployStyle.overviewHeader)
+                    let selectingSource = host["binding"].isNull && host["externalRoute"].isNull
+                    if selectingSource {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("选择服务来源")
+                                .font(.system(size: 12, weight: .semibold))
+                            Picker("服务来源", selection: $targetMode) {
+                                Text("iDeploy 部署").tag("deployment")
+                                Text("服务器现有服务").tag("server")
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 12)
+                        .background(DeployStyle.overviewPanel)
                     }
                     if !host["externalRoute"].isNull || targetMode == "server" {
-                        DomainExternalRouteView(host: host, onSaved: onSaved)
+                        DomainExternalRouteView(host: host, onSaved: bindingSaved, compact: selectingSource)
                     } else if ["active", "applying", "removing"].contains(host["binding"]["status"].string) {
-                        DomainAppliedBindingView(host: host, onSaved: onSaved)
+                        DomainAppliedBindingView(host: host, onSaved: bindingSaved)
                     } else {
-                        DomainBindingDraftView(host: host, onSaved: onSaved)
+                        DomainBindingDraftView(host: host, onSaved: bindingSaved, compact: selectingSource)
                     }
                 }
             } else {
@@ -717,10 +745,15 @@ struct DNSRecordBindingView: View {
                             Button("重试") { Task { await resolve() } }.buttonStyle(DeployPrimaryButtonStyle())
                         }
                     } else {
-                        ProgressView("正在读取域名及已有绑定…")
+                        HStack(spacing: 10) {
+                            ProgressView().controlSize(.small)
+                            Text("正在读取域名及已有绑定…")
+                                .foregroundStyle(DeployStyle.muted)
+                        }
                     }
                 }
-                .padding(24).frame(width: 580, alignment: .leading)
+                .padding(24)
+                .frame(width: 700, height: 650, alignment: .topLeading)
                 .background(DeployStyle.canvas)
             }
         }
@@ -730,15 +763,22 @@ struct DNSRecordBindingView: View {
     }
 
     private func resolve() async {
+        guard !resolving else { return }
+        resolving = true
+        defer { resolving = false }
         errorMessage = nil
         do {
             let resolved = try await NativeBridge.call("PrepareDNSRecordBinding", [domainID, recordID])
-            await model.refresh()
             host = resolved
             if !resolved["externalRoute"].isNull { targetMode = "server" }
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func bindingSaved() {
+        onSaved()
+        Task { await resolve() }
     }
 }
 
@@ -752,6 +792,8 @@ struct DomainBindingDraftView: View {
     @Environment(\.dismiss) private var dismiss
     let host: J
     let onSaved: () -> Void
+    let compact: Bool
+    @State private var savedBinding: J
     @State private var deploymentID: String
     @State private var serviceName: String
     @State private var containerPort: String
@@ -775,6 +817,9 @@ struct DomainBindingDraftView: View {
     @State private var selectedEndpointKey = ""
     @State private var plan = J(nil)
     @State private var planning = false
+    @State private var saving = false
+    @State private var actionError = ""
+    @State private var showingDelete = false
     @State private var queuedJob: J?
 
     private var discoveredEndpoints: [J] { endpointDiscovery["endpoints"].array }
@@ -797,7 +842,7 @@ struct DomainBindingDraftView: View {
     }
 
     private var draftDirty: Bool {
-        let saved = host["binding"]
+        let saved = savedBinding
         return saved.isNull || deploymentID != saved["deploymentId"].string ||
             serviceName != saved["serviceName"].string || containerPort != saved["containerPort"].string ||
             upstreamProtocol != saved["upstreamProtocol"].string || ingressMode != saved["ingressMode"].string ||
@@ -805,10 +850,12 @@ struct DomainBindingDraftView: View {
             (useHTTPS ? certificateKeyPath : "") != saved["certificateKeyPath"].string
     }
 
-    init(host: J, onSaved: @escaping () -> Void) {
+    init(host: J, onSaved: @escaping () -> Void, compact: Bool = false) {
         self.host = host
         self.onSaved = onSaved
+        self.compact = compact
         let binding = host["binding"]
+        _savedBinding = State(initialValue: binding)
         _deploymentID = State(initialValue: binding["deploymentId"].string)
         _serviceName = State(initialValue: binding["serviceName"].string)
         _containerPort = State(initialValue: binding["containerPort"].string)
@@ -820,17 +867,26 @@ struct DomainBindingDraftView: View {
     }
 
     var body: some View {
-        DomainFormShell(title: "配置访问目标", subtitle: host["fqdn"].string, saveTitle: "保存草稿", canSave: canSaveDraft) {
-            Task {
-                let input: [String: Any] = ["hostId": host.id, "deploymentId": deploymentID,
-                                            "serviceName": serviceName, "containerPort": Int(containerPort) ?? 0,
-                                            "upstreamProtocol": "http", "ingressMode": ingressMode,
-                                            "certificatePath": ingressMode == "nginx" && useHTTPS ? certificatePath : "",
-                                            "certificateKeyPath": ingressMode == "nginx" && useHTTPS ? certificateKeyPath : ""]
-                if await model.perform("SaveDomainBindingDraft", [input]) != nil { onSaved(); dismiss() }
-            }
+        DomainFormShell(title: savedBinding.isNull ? "服务绑定" : "管理绑定",
+                        subtitle: host["fqdn"].string,
+                        saveTitle: saving ? "保存中…" : "保存草稿",
+                        canSave: canSaveDraft && draftDirty && !saving,
+                        width: 700, height: compact ? 580 : 650, cancelTitle: "关闭") {
+            saveDraft()
         } content: {
             VStack(alignment: .leading, spacing: 17) {
+                HStack(spacing: 8) {
+                    Text("1 选择服务")
+                    Image(systemName: "chevron.right")
+                    Text("2 保存草稿")
+                    Image(systemName: "chevron.right")
+                    Text("3 预检并应用")
+                }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(DeployStyle.green)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .deployCard(fill: DeployStyle.greenSoft)
                 HStack {
                     SectionHeading("部署目标", "保存为待应用配置")
                     Spacer()
@@ -998,10 +1054,10 @@ struct DomainBindingDraftView: View {
                 }
                 Text("保存草稿不会修改服务器入口、DNS 或证书。保存后重新打开此项，依次预检、应用入口配置，再检查域名访问。")
                     .font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
-                if !host["binding"].isNull {
+                if !savedBinding.isNull {
                     HStack {
                         Button("预检已保存的入口") { loadPlan() }
-                            .buttonStyle(DeploySecondaryButtonStyle()).disabled(draftDirty)
+                            .buttonStyle(DeploySecondaryButtonStyle()).disabled(draftDirty || planning || saving)
                         if planning { ProgressView().controlSize(.small) }
                     }
                     if draftDirty {
@@ -1038,12 +1094,16 @@ struct DomainBindingDraftView: View {
                         }.padding(12).deployCard()
                     }
                 }
-                if !host["binding"].isNull {
+                if !savedBinding.isNull {
                     Button("删除绑定草稿", role: .destructive) {
-                        Task {
-                            if await model.perform("DeleteDomainBindingDraft", [host.id]) != nil { onSaved(); dismiss() }
-                        }
+                        showingDelete = true
                     }.buttonStyle(DeploySecondaryButtonStyle())
+                }
+                if !actionError.isEmpty {
+                    Text(actionError)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
                 }
             }.padding(16).deployCard(fill: DeployStyle.overviewPanel)
         }
@@ -1065,14 +1125,54 @@ struct DomainBindingDraftView: View {
         .sheet(item: $queuedJob) { job in
             JobDetailSheet(job: job).environmentObject(model).onDisappear { onSaved() }
         }
+        .confirmationDialog("删除绑定草稿？", isPresented: $showingDelete) {
+            Button("删除绑定草稿", role: .destructive) { deleteDraft() }
+        } message: {
+            Text("仅删除未应用的配置，不修改 DNS 解析或服务器入口。")
+        }
+    }
+
+    private func saveDraft() {
+        guard canSaveDraft && draftDirty && !saving else { return }
+        saving = true
+        actionError = ""
+        let input: [String: Any] = ["hostId": host.id, "deploymentId": deploymentID,
+                                    "serviceName": serviceName, "containerPort": Int(containerPort) ?? 0,
+                                    "upstreamProtocol": "http", "ingressMode": ingressMode,
+                                    "certificatePath": ingressMode == "nginx" && useHTTPS ? certificatePath : "",
+                                    "certificateKeyPath": ingressMode == "nginx" && useHTTPS ? certificateKeyPath : ""]
+        Task {
+            defer { saving = false }
+            do {
+                savedBinding = try await NativeBridge.call("SaveDomainBindingDraft", [input])
+                plan = J(nil)
+                onSaved()
+            } catch {
+                actionError = error.localizedDescription
+            }
+        }
+    }
+
+    private func deleteDraft() {
+        Task {
+            do {
+                _ = try await NativeBridge.call("DeleteDomainBindingDraft", [host.id])
+                onSaved()
+                dismiss()
+            } catch {
+                actionError = error.localizedDescription
+            }
+        }
     }
 
     private func loadPlan() {
         planning = true
+        actionError = ""
         Task {
+            defer { planning = false }
             let method = ingressMode == "nginx" ? "PlanExistingNginxBinding" : "PlanDomainBinding"
-            plan = await model.perform(method, [host.id], refreshAfter: false) ?? J(nil)
-            planning = false
+            do { plan = try await NativeBridge.call(method, [host.id]) }
+            catch { actionError = error.localizedDescription }
         }
     }
 
@@ -1142,9 +1242,12 @@ struct DomainBindingDraftView: View {
             let method = ingressMode == "nginx" ? "ApplyExistingNginxBinding" : "ApplyDomainBinding"
             var arguments: [Any] = [host.id, plan["bindingUpdatedAt"].string]
             if ingressMode == "nginx" { arguments.append(plan["ingressConfigHash"].string) }
-            if let job = await model.perform(method, arguments, refreshAfter: false) {
+            do {
+                let job = try await NativeBridge.call(method, arguments)
                 queuedJob = job
                 plan = J(nil)
+            } catch {
+                actionError = error.localizedDescription
             }
         }
     }
@@ -1187,45 +1290,81 @@ struct DomainAppliedBindingView: View {
     @State private var showingRemove = false
     @State private var access = J(nil)
     @State private var checkingAccess = false
+    @State private var accessError = ""
 
     var body: some View {
         let binding = host["binding"]
         VStack(spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("域名入口").font(.system(size: 21, weight: .bold)).foregroundStyle(DeployStyle.ink)
+                    Text("管理绑定").font(.system(size: 21, weight: .bold)).foregroundStyle(DeployStyle.ink)
                     Text(host["fqdn"].string).font(.system(size: 12)).foregroundStyle(DeployStyle.muted)
                 }
                 Spacer()
+                Text(binding["status"].string == "active" ? "已应用" : "处理中")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(binding["status"].string == "active" ? DeployStyle.green : .orange)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(DeployStyle.greenSoft, in: Capsule())
             }.padding(20).background(DeployStyle.overviewHeader)
-            VStack(alignment: .leading, spacing: 14) {
-                SectionHeading(binding["status"].string == "active" ? "已应用的入口" : "入口任务处理中", "DNS 解析和 HTTPS 证书需分别核验")
-                if binding["status"].string == "active" {
-                    Text("后端：\(binding["hostIp"].string):\(String(binding["hostPort"].int)) → 容器端口 \(String(binding["containerPort"].int))")
-                        .font(.system(size: 12)).textSelection(.enabled)
-                }
-                Text(binding["detail"].string).font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
-                if binding["status"].string == "active" {
-                    HStack {
-                        Button("检查访问") { inspectAccess() }.buttonStyle(DeploySecondaryButtonStyle())
-                        if checkingAccess { ProgressView().controlSize(.small) }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        SectionHeading(binding["status"].string == "active" ? "已应用的入口" : "入口任务处理中",
+                                       "当前状态只表示入口配置；仍需核验 DNS、HTTPS 和应用响应")
+                        if binding["status"].string == "active" {
+                            Text("\(host["fqdn"].string) → \(binding["hostIp"].string):\(String(binding["hostPort"].int)) → 容器端口 \(String(binding["containerPort"].int))")
+                                .font(.system(size: 12, design: .monospaced))
+                                .textSelection(.enabled)
+                        }
+                        Text(binding["detail"].string)
+                            .font(.system(size: 11))
+                            .foregroundStyle(DeployStyle.muted)
+                            .textSelection(.enabled)
                     }
-                    if !access.isNull {
-                        Text(access["status"].string == "reachable" ? "本机访问验证通过" : "访问尚未就绪")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(access["status"].string == "reachable" ? DeployStyle.green : .orange)
-                        Text("DNS：\(access["dnsStatus"].string) · 入口：\(access["ingressStatus"].string) · 后端：\(access["backendStatus"].string) · HTTPS：\(access["httpsStatus"].string)")
-                            .font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
-                        Text(access["detail"].string).font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
+                    .padding(18)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .deployCard(fill: DeployStyle.overviewPanel)
+                    if binding["status"].string == "active" {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                SectionHeading("访问检查")
+                                Spacer()
+                                Button("重新检查") { inspectAccess() }
+                                    .buttonStyle(DeploySecondaryButtonStyle())
+                                    .disabled(checkingAccess)
+                                if checkingAccess { ProgressView().controlSize(.small) }
+                            }
+                            if !accessError.isEmpty {
+                                Text(accessError).foregroundStyle(.red).textSelection(.enabled)
+                            } else if !access.isNull {
+                                Text(access["status"].string == "reachable" ? "访问验证通过" : "访问尚未就绪")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(access["status"].string == "reachable" ? DeployStyle.green : .orange)
+                                Text("DNS：\(access["dnsStatus"].string) · 入口：\(access["ingressStatus"].string) · 后端：\(access["backendStatus"].string) · HTTPS：\(access["httpsStatus"].string)")
+                                    .foregroundStyle(DeployStyle.muted)
+                                    .textSelection(.enabled)
+                                Text(access["detail"].string)
+                                    .foregroundStyle(DeployStyle.muted)
+                                    .textSelection(.enabled)
+                            } else {
+                                Text("正在读取访问状态…").foregroundStyle(DeployStyle.muted)
+                            }
+                        }
+                        .font(.system(size: 11))
+                        .padding(18)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .deployCard()
+                    }
+                    if ["applying", "removing"].contains(binding["status"].string) {
+                        Text("入口任务正在执行；可在任务列表查看进度和结果。")
+                            .foregroundStyle(.orange)
                     }
                 }
-                if ["applying", "removing"].contains(binding["status"].string) {
-                    Text("任务执行中或需要重试；请在任务列表查看结果。")
-                        .foregroundStyle(.orange)
-                }
-            }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
-                .deployCard(fill: DeployStyle.overviewPanel).padding(20)
-            Spacer()
+                .padding(20)
+            }
+            .background(DeployStyle.canvas)
+            Rectangle().fill(DeployStyle.line).frame(height: 1)
             HStack {
                 Button("解除入口绑定", role: .destructive) { showingRemove = true }
                     .buttonStyle(DeploySecondaryButtonStyle())
@@ -1235,7 +1374,7 @@ struct DomainAppliedBindingView: View {
                     .keyboardShortcut(.cancelAction)
             }.padding(20).background(DeployStyle.overviewPanel)
         }
-        .frame(width: 620, height: 510).environment(\.colorScheme, .light)
+        .frame(width: 700, height: 650).environment(\.colorScheme, .light)
         .confirmationDialog("解除域名入口绑定？", isPresented: $showingRemove) {
             Button("解除入口绑定", role: .destructive) {
                 Task {
@@ -1253,9 +1392,11 @@ struct DomainAppliedBindingView: View {
 
     private func inspectAccess() {
         checkingAccess = true
+        accessError = ""
         Task {
-            access = await model.perform("InspectDomainAccess", [host.id], refreshAfter: false) ?? J(nil)
-            checkingAccess = false
+            defer { checkingAccess = false }
+            do { access = try await NativeBridge.call("InspectDomainAccess", [host.id]) }
+            catch { accessError = error.localizedDescription }
         }
     }
 }

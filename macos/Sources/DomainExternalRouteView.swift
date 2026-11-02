@@ -7,6 +7,7 @@ struct DomainExternalRouteView: View {
     @Environment(\.dismiss) private var dismiss
     let host: J
     let onSaved: () -> Void
+    let compact: Bool
 
     @State private var route: J
     @State private var serverID: String
@@ -27,9 +28,10 @@ struct DomainExternalRouteView: View {
     @State private var access = J(nil)
     @State private var checkingAccess = false
 
-    init(host: J, onSaved: @escaping () -> Void) {
+    init(host: J, onSaved: @escaping () -> Void, compact: Bool = false) {
         self.host = host
         self.onSaved = onSaved
+        self.compact = compact
         let saved = host["externalRoute"]
         _route = State(initialValue: saved)
         _serverID = State(initialValue: saved["serverId"].string)
@@ -42,6 +44,11 @@ struct DomainExternalRouteView: View {
 
     private var active: Bool { route["status"].string == "active" }
     private var processing: Bool { ["applying", "removing"].contains(route["status"].string) }
+    private var canSave: Bool {
+        !saving && !serverID.isEmpty && !hostIP.isEmpty &&
+        Int(hostPort).map { (1...65535).contains($0) } == true &&
+        (!useHTTPS || (!certificatePath.isEmpty && !certificateKeyPath.isEmpty))
+    }
     private var dirty: Bool {
         route.isNull || serverID != route["serverId"].string || hostIP != route["hostIp"].string ||
         hostPort != route["hostPort"].string ||
@@ -52,7 +59,7 @@ struct DomainExternalRouteView: View {
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 5) {
-                Text("配置服务器服务").font(.system(size: 21, weight: .bold))
+                Text(route.isNull ? "服务绑定" : "管理绑定").font(.system(size: 21, weight: .bold))
                 Text(host["fqdn"].string).font(.system(size: 12)).foregroundStyle(DeployStyle.muted)
             }.frame(maxWidth: .infinity, alignment: .leading)
                 .padding(20).background(DeployStyle.overviewHeader)
@@ -152,20 +159,12 @@ struct DomainExternalRouteView: View {
                             Text(access["detail"].string).font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
                                 .textSelection(.enabled)
                         }
-                        Button("解除入口路由", role: .destructive) { showingRemove = true }
-                            .buttonStyle(DeploySecondaryButtonStyle())
                     } else if processing {
                         Text("入口任务处理中，请在任务列表查看结果。")
                             .font(.system(size: 11)).foregroundStyle(AppColors.warning)
                     } else {
-                        HStack {
-                            Button(saving ? "保存中…" : "保存草稿") { save() }
-                                .buttonStyle(DeployPrimaryButtonStyle())
-                                .disabled(saving || serverID.isEmpty || Int(hostPort) == nil || hostIP.isEmpty || (useHTTPS && (certificatePath.isEmpty || certificateKeyPath.isEmpty)))
-                            Button("预检已保存的路由") { loadPlan() }
-                                .buttonStyle(DeploySecondaryButtonStyle()).disabled(route.isNull || dirty || planning)
-                            if planning { ProgressView().controlSize(.small) }
-                        }
+                        Text("先保存草稿，再预检 Nginx 路由；预检通过后才会执行应用。")
+                            .font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
                         if !route.isNull && !dirty {
                             Button("删除草稿", role: .destructive) { deleteDraft() }
                                 .buttonStyle(DeploySecondaryButtonStyle())
@@ -191,10 +190,32 @@ struct DomainExternalRouteView: View {
                     }
                 }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
             }.background(DeployStyle.canvas)
-            HStack { Spacer(); Button("关闭") { dismiss() }.buttonStyle(DeploySecondaryButtonStyle()).keyboardShortcut(.cancelAction) }
-                .padding(18).background(DeployStyle.overviewPanel)
+            Rectangle().fill(DeployStyle.line).frame(height: 1)
+            HStack(spacing: 10) {
+                if active {
+                    Button("解除入口路由", role: .destructive) { showingRemove = true }
+                        .buttonStyle(DeploySecondaryButtonStyle())
+                } else if !processing {
+                    Button("预检已保存的路由") { loadPlan() }
+                        .buttonStyle(DeploySecondaryButtonStyle())
+                        .disabled(route.isNull || dirty || planning || saving)
+                    if planning { ProgressView().controlSize(.small) }
+                }
+                Spacer()
+                Button("关闭") { dismiss() }
+                    .buttonStyle(DeploySecondaryButtonStyle())
+                    .keyboardShortcut(.cancelAction)
+                if !active && !processing {
+                    Button(saving ? "保存中…" : "保存草稿") { save() }
+                        .buttonStyle(DeployPrimaryButtonStyle())
+                        .disabled(!canSave || !dirty)
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(18)
+            .background(DeployStyle.overviewPanel)
         }
-        .frame(width: 680, height: 650)
+        .frame(width: 700, height: compact ? 580 : 650)
         .foregroundStyle(DeployStyle.ink)
         .environment(\.colorScheme, .light)
         .onChange(of: serverID) { _ in scan = J(nil); plan = J(nil) }

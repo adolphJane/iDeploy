@@ -42,6 +42,10 @@ codex mcp list
 - `doctor`
 - `list_projects`
 - `list_servers`
+- `get_server_agent_status`（Agent 状态、版本和 CPU／内存／存储指标）
+- `list_domains`
+- `list_domain_hosts`
+- `list_dns_records`（从已连接的 DNS 服务商实时读取）
 - `list_remote_containers`
 - `inspect_deployment_runtime`
 - `list_deployment_environment`
@@ -53,6 +57,7 @@ codex mcp list
 - `list_deployments`
 - `get_deployment`
 - `preflight_deployment`
+- `get_preflight_progress`
 - `list_releases`
 - `list_jobs`
 - `get_job`
@@ -79,6 +84,9 @@ codex mcp list
 - `stop_deployment`
 - `restart_deployment`
 - `cancel_job`
+- `install_server_agent`
+- `update_server_agent`
+- `uninstall_server_agent`（要求 `confirm=true`）
 
 会删除本地配置、但不会删除源码、镜像或远程工作负载的工具：
 
@@ -86,6 +94,10 @@ codex mcp list
 - `delete_deployment`
 
 远程变更工具带有 MCP destructive/open-world 标记，并在说明中要求 AI 仅在用户明确要求具体操作后调用；创建和更新配置标记为非破坏性的本地写入。删除工具只删除 iDeploy 本地配置，但仍要求 `confirm=true`。Registry、SSH 和 Keychain 凭据不会作为工具参数或结果返回。`list_deployment_environment` 会返回普通变量值；秘密变量仅返回名称、类型和 `configured` 状态。MCP 不接受原始部署秘密；`request_deployment_secret_input` 会在本机打开隐藏输入框并直接保存到 macOS Keychain。
+
+Agent 安装、更新和卸载会返回任务 ID，可用 `get_job` 或 `wait_job` 跟踪。卸载会删除远端 Agent 和本机配对凭据，保留现有容器与证书。域名与 DNS 工具目前只提供查询，DNS 记录编辑、证书申请和入口代理变更仍由桌面端执行。项目 Dockerfile／Compose 可能包含明文凭据，MCP 暂不提供文件原文的读取与编辑工具。
+
+`preflight_deployment` 可传入唯一 `request_id`，检查运行期间使用同一 ID 调用 `get_preflight_progress` 可获取当前阶段和已完成检查。发布前检查最多等待 3 分钟；进度完成后仅短时间保留。
 
 配置写入可提供调用方生成的 `request_id`（8 到 128 个安全字符）。同一个请求不确定是否完成时，必须复用原 `request_id`，不能生成新 ID；iDeploy 会返回已保存的首次结果。收到 `operation_pending` 或本地控制连接超时后，调用 `get_operation` 查询最终状态。
 

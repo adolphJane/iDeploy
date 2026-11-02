@@ -55,12 +55,14 @@ struct DeployGroupBoxStyle: GroupBoxStyle {
 }
 
 struct DeployPrimaryButtonStyle: ButtonStyle {
+    var width: CGFloat? = nil
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(.white)
             .padding(.horizontal, 15)
-            .frame(height: 34)
+            .frame(width: width, height: 34)
             .background(configuration.isPressed ? DeployStyle.green.opacity(0.8) : DeployStyle.green,
                         in: RoundedRectangle(cornerRadius: 9, style: .continuous))
             .shadow(color: DeployStyle.green.opacity(configuration.isPressed ? 0.08 : 0.18), radius: 9, y: 4)
@@ -68,12 +70,15 @@ struct DeployPrimaryButtonStyle: ButtonStyle {
 }
 
 struct DeploySecondaryButtonStyle: ButtonStyle {
+    var width: CGFloat? = nil
+    var height: CGFloat = 32
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 12, weight: .medium))
             .foregroundStyle(DeployStyle.green)
             .padding(.horizontal, 12)
-            .frame(height: 32)
+            .frame(width: width, height: height)
             .background(configuration.isPressed ? DeployStyle.greenSoft : .white,
                         in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay {
