@@ -9,6 +9,7 @@ import (
 type Route struct {
 	HostID         string
 	FQDN           string
+	PathPrefix     string
 	HostIP         string
 	HostPort       int
 	UpstreamScheme string
@@ -33,14 +34,18 @@ func (s *Store) GetIngress(ctx context.Context, serverID string) (Ingress, error
 }
 
 func (s *Store) ListServerRoutes(ctx context.Context, serverID string) ([]Route, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT h.id,h.fqdn,b.host_ip,b.host_port,b.upstream_protocol,b.certificate_path,b.certificate_key_path
+	rows, err := s.db.QueryContext(ctx, `SELECT h.id,h.fqdn,'',b.host_ip,b.host_port,b.upstream_protocol,b.certificate_path,b.certificate_key_path
         FROM domain_bindings b JOIN domain_hosts h ON h.id=b.host_id
         JOIN deployment_targets d ON d.id=b.deployment_id
 		WHERE d.server_id=? AND b.status IN ('active','removing')
 		UNION ALL
-		SELECT h.id,h.fqdn,e.host_ip,e.host_port,e.upstream_scheme,e.certificate_path,e.certificate_key_path
+		SELECT h.id,h.fqdn,'',e.host_ip,e.host_port,e.upstream_scheme,e.certificate_path,e.certificate_key_path
 		FROM nginx_external_routes e JOIN domain_hosts h ON h.id=e.host_id
-		WHERE e.server_id=? AND e.status IN ('active','removing') ORDER BY 2`, serverID, serverID)
+		WHERE e.server_id=? AND e.status IN ('active','removing')
+		UNION ALL
+		SELECT p.id,p.fqdn,p.path_prefix,p.host_ip,p.host_port,'http',p.certificate_path,p.certificate_key_path
+		FROM shared_path_routes p JOIN deployment_targets d ON d.id=p.deployment_id
+		WHERE d.server_id=? AND p.status IN ('active','removing') ORDER BY 2,3`, serverID, serverID, serverID)
 	if err != nil {
 		return nil, err
 	}
@@ -48,7 +53,7 @@ func (s *Store) ListServerRoutes(ctx context.Context, serverID string) ([]Route,
 	result := []Route{}
 	for rows.Next() {
 		var route Route
-		if err := rows.Scan(&route.HostID, &route.FQDN, &route.HostIP, &route.HostPort, &route.UpstreamScheme, &route.Certificate, &route.CertificateKey); err != nil {
+		if err := rows.Scan(&route.HostID, &route.FQDN, &route.PathPrefix, &route.HostIP, &route.HostPort, &route.UpstreamScheme, &route.Certificate, &route.CertificateKey); err != nil {
 			return nil, err
 		}
 		result = append(result, route)

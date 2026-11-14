@@ -30,10 +30,11 @@ ideploy doctor
 ideploy project list
 ideploy server list
 ideploy registry list
+ideploy ingress list
 ideploy deployment list
 ideploy deployment get <deployment-id>
 
-ideploy deployment publish <deployment-id> --registry <registry-id> [--version <version>]
+ideploy deployment publish <deployment-id> --registry <registry-id> --domain <fqdn> --path <name> --container-port <port> [--service <name>] [--version <version>]
 ideploy deployment rollback <deployment-id> --release <release-id>
 ideploy deployment start <deployment-id>
 ideploy deployment stop <deployment-id>
@@ -45,6 +46,8 @@ ideploy job get <job-id>
 ideploy job wait <job-id>
 ideploy job cancel <job-id>
 ```
+
+发布路径会作为 `IDEPLOY_BASE_PATH`（例如 `/demo/`）传给单容器构建和运行环境；Compose 构建时可通过同名变量引用。项目适配方式见 [`INTERNAL_INGRESS.md`](INTERNAL_INGRESS.md)。
 
 `ideploy mcp` 是供 AI 客户端启动的 stdio MCP Server，不是面向人工交互的普通终端命令。配置方式和工具清单见 [`MCP.md`](MCP.md)。
 

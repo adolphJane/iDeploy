@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"ideploy/internal/deployment"
+	"ideploy/internal/domain"
 	"ideploy/internal/platform/toolchain"
 	"ideploy/internal/project"
 	"ideploy/internal/registry"
@@ -21,9 +22,13 @@ import (
 )
 
 type DeploymentPreflightInput struct {
-	DeploymentID string `json:"deploymentId"`
-	RegistryID   string `json:"registryId"`
-	RequestID    string `json:"requestId,omitempty"`
+	DeploymentID  string `json:"deploymentId"`
+	RegistryID    string `json:"registryId"`
+	RequestID     string `json:"requestId,omitempty"`
+	FQDN          string `json:"fqdn,omitempty"`
+	PathPrefix    string `json:"pathPrefix,omitempty"`
+	ServiceName   string `json:"serviceName,omitempty"`
+	ContainerPort int    `json:"containerPort,omitempty"`
 }
 
 type DeploymentPreflightCheckView struct {
@@ -149,6 +154,14 @@ func (s *SystemService) PreflightDeployment(input DeploymentPreflightInput) (Dep
 		if status == "failed" {
 			view.OK = false
 		}
+	}
+	if input.FQDN == "" || input.PathPrefix == "" || input.ContainerPort < 1 || input.ContainerPort > 65535 {
+		add("internal_ingress", "failed", "请选择入口域名、单级项目路径和应用容器端口")
+		return view, nil
+	}
+	if _, err := domain.NormalizeSharedPath(input.PathPrefix); err != nil {
+		add("internal_ingress", "failed", err.Error())
+		return view, nil
 	}
 
 	root := projectValue.LocalPath
@@ -346,6 +359,71 @@ func (s *SystemService) PreflightDeployment(input DeploymentPreflightInput) (Dep
 	} else {
 		add("remote_port", "warning", "Compose 端口由 Compose 文件管理，当前未进行逐服务端口解析")
 	}
+	setStage(5, "正在检查内部 HTTPS 入口和发布路径")
+	path, pathErr := domain.NormalizeSharedPath(input.PathPrefix)
+	if pathErr != nil {
+		add("internal_ingress", "failed", pathErr.Error())
+		return view, nil
+	}
+	paths, storeErr := s.domainStore()
+	if storeErr != nil {
+		add("internal_ingress", "failed", storeErr.Error())
+		return view, nil
+	}
+	entry, entryErr := paths.GetInternalIngress(ctx, strings.ToLower(strings.TrimSpace(input.FQDN)))
+	if entryErr != nil || entry.Status != "ready" || entry.ServerID != target.ServerID {
+		add("internal_ingress", "failed", "目标服务器的内部 HTTPS 入口尚未就绪")
+		return view, nil
+	}
+	routes, routeErr := paths.ListPathRoutes(ctx)
+	if routeErr != nil {
+		add("internal_ingress", "failed", routeErr.Error())
+		return view, nil
+	}
+	for _, route := range routes {
+		if route.FQDN == entry.FQDN && route.PathPrefix == path && route.DeploymentID != target.ID {
+			add("internal_ingress", "failed", "此域名路径已由其他部署使用")
+			return view, nil
+		}
+		if route.DeploymentID == target.ID && route.Status == "active" && (route.FQDN != entry.FQDN || route.PathPrefix != path) {
+			add("internal_ingress", "failed", "此部署已有生效路径，请先解除旧路径")
+			return view, nil
+		}
+	}
+	if target.WorkloadKind == "container" {
+		mapped := target.ContainerPorts
+		if root != "" {
+			if resolved, err := project.ResolveContainerPorts(root, projectValue.ContextPath, projectValue.DockerfilePath, mapped); err == nil {
+				mapped = resolved
+			}
+		}
+		matchingPort := false
+		for _, mapping := range mapped {
+			parts := strings.Split(strings.SplitN(mapping, "/", 2)[0], ":")
+			if len(parts) < 2 {
+				continue
+			}
+			port, err := strconv.Atoi(parts[len(parts)-1])
+			if err == nil && port == input.ContainerPort {
+				matchingPort = true
+				break
+			}
+		}
+		if !matchingPort {
+			add("internal_ingress", "failed", "所选容器端口未在部署的端口映射中发布")
+			return view, nil
+		}
+	}
+	observed, inspectErr := s.inspectInternalIngress(ctx, entry.FQDN)
+	if inspectErr != nil {
+		add("internal_ingress", "failed", inspectErr.Error())
+		return view, nil
+	}
+	if observed.Status != "ready" {
+		add("internal_ingress", "failed", observed.Detail)
+		return view, nil
+	}
+	add("internal_ingress", "ok", "HTTPS 入口已就绪，发布路径："+entry.FQDN+path)
 	return view, nil
 }
 

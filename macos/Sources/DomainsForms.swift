@@ -1,6 +1,16 @@
 import AppKit
 import SwiftUI
 
+private struct DomainSheetCanvasBackground: ViewModifier {
+    @ViewBuilder func body(content: Content) -> some View {
+        if #available(macOS 13.3, *) {
+            content.presentationBackground(DeployStyle.canvas)
+        } else {
+            content.background(DeployStyle.canvas)
+        }
+    }
+}
+
 private struct DomainFormShell<Content: View>: View {
     @Environment(\.dismiss) private var dismiss
     let title: String
@@ -53,6 +63,7 @@ private struct DomainFormShell<Content: View>: View {
             }.padding(20).background(DeployStyle.overviewPanel)
         }
         .frame(width: width, height: height)
+        .background(DeployStyle.canvas)
         .environment(\.colorScheme, .light)
     }
 }
@@ -758,6 +769,8 @@ struct DNSRecordBindingView: View {
             }
         }
         .foregroundStyle(DeployStyle.ink)
+        .background(DeployStyle.canvas)
+        .modifier(DomainSheetCanvasBackground())
         .environment(\.colorScheme, .light)
         .task { await resolve() }
     }
@@ -1374,7 +1387,9 @@ struct DomainAppliedBindingView: View {
                     .keyboardShortcut(.cancelAction)
             }.padding(20).background(DeployStyle.overviewPanel)
         }
-        .frame(width: 700, height: 650).environment(\.colorScheme, .light)
+        .frame(width: 700, height: 650)
+        .background(DeployStyle.canvas)
+        .environment(\.colorScheme, .light)
         .confirmationDialog("解除域名入口绑定？", isPresented: $showingRemove) {
             Button("解除入口绑定", role: .destructive) {
                 Task {

@@ -108,6 +108,10 @@ func (s *SystemService) UpdateDeploymentEnvironment(input DeploymentEnvironmentU
 			cleanupEnvironmentSecrets(ctx, newSecretRefs)
 			return DeploymentEnvironmentView{}, fmt.Errorf("%s: %w", variable.Name, err)
 		}
+		if name == "IDEPLOY_BASE_PATH" {
+			cleanupEnvironmentSecrets(ctx, newSecretRefs)
+			return DeploymentEnvironmentView{}, errors.New("IDEPLOY_BASE_PATH 由发布路径自动管理，不能手动设置")
+		}
 		if _, removing := removeNames[name]; removing {
 			cleanupEnvironmentSecrets(ctx, newSecretRefs)
 			return DeploymentEnvironmentView{}, fmt.Errorf("环境变量 %s 不能同时更新和删除", name)

@@ -127,6 +127,32 @@ func TestDeployContainerRestoresPreviousOnRunFailure(t *testing.T) {
 	}
 }
 
+func TestDeployContainerAcceptsMissingContainer(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "docker-calls")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + logPath + "\nif [ \"$1 $2\" = 'container inspect' ]; then echo 'Error response from daemon: No such container: apps' >&2; exit 1; fi\nif [ \"$1\" = run ]; then echo new-container-id; fi\n"
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	req := OperationRequest{ID: strings.Repeat("f", 32), Kind: "container.deploy", ContainerID: "apps", Image: "nginx:stable-alpine", RestartPolicy: "unless-stopped", Ports: []string{"127.0.0.1:8766:80"}, Labels: map[string]string{"com.ideploy.role": "apps-gateway"}}
+	replacement, err := deployContainer(t.Context(), req)
+	if err != nil || replacement.HadPrevious || replacement.Name != "apps" {
+		t.Fatalf("first deployment failed: replacement=%+v err=%v", replacement, err)
+	}
+	commands, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(commands), "run -d --restart unless-stopped --name apps") {
+		t.Fatalf("container was not started: %s", commands)
+	}
+}
+
 func TestComposeManifestNotWrittenToOperationJournal(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)

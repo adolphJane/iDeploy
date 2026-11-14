@@ -38,6 +38,7 @@ func TestMCPDomainAgentAndPreflightProgressMappings(t *testing.T) {
 	}{
 		{"get_server_agent_status", map[string]any{"server_id": "srv-1"}, "server.agent.status", "srv-1"},
 		{"list_domains", map[string]any{}, "domain.list", ""},
+		{"list_internal_ingresses", map[string]any{}, "internal.ingress.list", ""},
 		{"list_domain_hosts", map[string]any{"domain_id": "dom-1"}, "domain.host.list", "dom-1"},
 		{"list_dns_records", map[string]any{"domain_id": "dom-1"}, "domain.dns-record.list", "dom-1"},
 		{"install_server_agent", map[string]any{"server_id": "srv-1"}, "server.agent.install", "srv-1"},
@@ -76,7 +77,7 @@ func TestMCPListsExpectedTools(t *testing.T) {
 	expected := map[string]bool{
 		"get_version": false, "doctor": false, "list_projects": false, "validate_project": false, "create_project": false, "update_project": false, "delete_project": false,
 		"list_servers": false, "get_server_agent_status": false, "install_server_agent": false, "update_server_agent": false, "uninstall_server_agent": false,
-		"list_domains": false, "list_domain_hosts": false, "list_dns_records": false,
+		"list_domains": false, "list_domain_hosts": false, "list_dns_records": false, "list_internal_ingresses": false,
 		"list_remote_containers": false, "get_container_logs": false, "check_port_availability": false,
 		"list_registries": false, "get_build_proxy_settings": false, "configure_build_proxy": false,
 		"get_operation": false, "list_deployments": false, "list_deployment_environment": false,
@@ -182,14 +183,14 @@ func TestMCPPreflightAndRetryMapArguments(t *testing.T) {
 	defer closeSessions()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if result, err := client.CallTool(ctx, &mcp.CallToolParams{Name: "preflight_deployment", Arguments: map[string]any{"deployment_id": "deployment-1", "registry_id": "registry-1", "request_id": "preflight-001"}}); err != nil || result.IsError {
+	if result, err := client.CallTool(ctx, &mcp.CallToolParams{Name: "preflight_deployment", Arguments: map[string]any{"deployment_id": "deployment-1", "registry_id": "registry-1", "request_id": "preflight-001", "domain": "apps.example.com", "path": "demo", "container_port": 8080}}); err != nil || result.IsError {
 		t.Fatalf("preflight failed: result=%#v err=%v", result, err)
 	}
 	if result, err := client.CallTool(ctx, &mcp.CallToolParams{Name: "retry_release", Arguments: map[string]any{"release_id": "release-1", "wait": false}}); err != nil || result.IsError {
 		t.Fatalf("retry failed: result=%#v err=%v", result, err)
 	}
 	preflight, retry := <-requests, <-requests
-	if preflight.Command != "deployment.preflight" || preflight.ID != "deployment-1" || preflight.RegistryID != "registry-1" || preflight.RequestID != "preflight-001" {
+	if preflight.Command != "deployment.preflight" || preflight.ID != "deployment-1" || preflight.RegistryID != "registry-1" || preflight.RequestID != "preflight-001" || preflight.FQDN != "apps.example.com" || preflight.PathPrefix != "demo" || preflight.ContainerPort != 8080 {
 		t.Fatalf("unexpected preflight mapping: %#v", preflight)
 	}
 	if retry.Command != "release.retry" || retry.ReleaseID != "release-1" || retry.Wait {
@@ -370,9 +371,13 @@ func TestMCPPublishMapsStructuredArguments(t *testing.T) {
 	result, err := client.CallTool(ctx, &mcp.CallToolParams{
 		Name: "publish_deployment",
 		Arguments: map[string]any{
-			"deployment_id": "deployment-1",
-			"registry_id":   "registry-1",
-			"version":       "v1.2.3",
+			"deployment_id":  "deployment-1",
+			"registry_id":    "registry-1",
+			"domain":         "apps.example.com",
+			"path":           "demo",
+			"container_port": 8080,
+			"service_name":   "api",
+			"version":        "v1.2.3",
 		},
 	})
 	if err != nil {
@@ -385,7 +390,7 @@ func TestMCPPublishMapsStructuredArguments(t *testing.T) {
 	mu.Lock()
 	request := captured
 	mu.Unlock()
-	if request.Command != "deployment.publish" || request.ID != "deployment-1" || request.RegistryID != "registry-1" || request.Version != "v1.2.3" {
+	if request.Command != "deployment.publish" || request.ID != "deployment-1" || request.RegistryID != "registry-1" || request.Version != "v1.2.3" || request.FQDN != "apps.example.com" || request.PathPrefix != "demo" || request.ContainerPort != 8080 || request.ServiceName != "api" {
 		t.Fatalf("unexpected request mapping: %#v", request)
 	}
 	if !request.Wait {

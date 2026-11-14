@@ -166,6 +166,8 @@ func (s *Store) ClearAll(ctx context.Context) (ClearAllResult, error) {
 			result.CredentialRefs = append(result.CredentialRefs, ref)
 		}
 		result.CredentialRefs = append(result.CredentialRefs, AgentPairingCredentialRef(id))
+		result.CredentialRefs = append(result.CredentialRefs, SharedServerTokenCredentialRef(id))
+		result.CredentialRefs = append(result.CredentialRefs, SharedVaultKeyCredentialRef(id))
 	}
 	if err := rows.Close(); err != nil {
 		return ClearAllResult{}, err

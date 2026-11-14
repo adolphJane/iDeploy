@@ -216,6 +216,7 @@ struct DomainExternalRouteView: View {
             .background(DeployStyle.overviewPanel)
         }
         .frame(width: 700, height: compact ? 580 : 650)
+        .background(DeployStyle.canvas)
         .foregroundStyle(DeployStyle.ink)
         .environment(\.colorScheme, .light)
         .onChange(of: serverID) { _ in scan = J(nil); plan = J(nil) }

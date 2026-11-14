@@ -26,7 +26,7 @@ type cliOptions struct {
 var cliCommands = map[string]bool{
 	"help": true, "version": true, "doctor": true, "install-cli": true,
 	"project": true, "server": true, "registry": true, "deployment": true,
-	"release": true, "job": true,
+	"release": true, "job": true, "ingress": true,
 }
 
 func shouldRunCLI(arguments []string) bool {
@@ -137,6 +137,11 @@ func parseCLIArguments(arguments []string) (cliRequest, cliOptions, string, erro
 		if action != "list" || len(remaining) != 0 {
 			return cliRequest{}, options, "", fmt.Errorf("supported command: %s list", group)
 		}
+	case "ingress":
+		if action != "list" || len(remaining) != 0 {
+			return cliRequest{}, options, "", errors.New("supported command: ingress list")
+		}
+		request.Command = "internal.ingress.list"
 	case "deployment":
 		switch action {
 		case "list":
@@ -197,6 +202,10 @@ func parseCLIArguments(arguments []string) (cliRequest, cliOptions, string, erro
 			set := newCLIFlagSet("deployment publish")
 			set.StringVar(&request.RegistryID, "registry", "", "registry ID")
 			set.StringVar(&request.Version, "version", "", "release version")
+			set.StringVar(&request.FQDN, "domain", "", "configured HTTPS ingress domain")
+			set.StringVar(&request.PathPrefix, "path", "", "single-segment project path")
+			set.StringVar(&request.ServiceName, "service", "", "container or Compose service name")
+			set.IntVar(&request.ContainerPort, "container-port", 0, "application HTTP container port")
 			if err := set.Parse(flags); err != nil {
 				return cliRequest{}, options, "", err
 			}
@@ -205,6 +214,9 @@ func parseCLIArguments(arguments []string) (cliRequest, cliOptions, string, erro
 			}
 			if request.RegistryID == "" {
 				return cliRequest{}, options, "", errors.New("deployment publish requires --registry")
+			}
+			if request.FQDN == "" || request.PathPrefix == "" || request.ContainerPort < 1 || request.ContainerPort > 65535 {
+				return cliRequest{}, options, "", errors.New("deployment publish requires --domain, --path and --container-port")
 			}
 			request.ID = id
 		case "rollback":
@@ -377,13 +389,14 @@ Commands:
   project list
   server list
   registry list
+  ingress list
   deployment list
   deployment get <deployment-id>
   deployment env list <deployment-id>
   deployment env set <deployment-id> KEY=VALUE [KEY=VALUE ...]
   deployment env remove <deployment-id> KEY [KEY ...]
   deployment env set-secret <deployment-id> KEY
-  deployment publish <deployment-id> --registry <registry-id> [--version <version>]
+  deployment publish <deployment-id> --registry <registry-id> --domain <fqdn> --path <name> --container-port <port> [--service <name>] [--version <version>]
   deployment rollback <deployment-id> --release <release-id>
   deployment start|stop|restart <deployment-id>
   release list --deployment <deployment-id>

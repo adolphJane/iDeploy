@@ -1,12 +1,14 @@
 import SwiftUI
 
 private struct DomainSheetRequest: Identifiable {
-    enum Kind { case domain, host, hostNote, dnsConfig, connections, records, binding, dnsBinding, proxyScan }
+    enum Kind { case domain, host, hostNote, dnsConfig, connections, records, binding, dnsBinding, proxyScan, certificate }
     let id = UUID()
     let kind: Kind
     var domain: J? = nil
     var host: J? = nil
     var recordID: String? = nil
+    var fqdn: String? = nil
+    var serverID: String? = nil
 }
 
 private struct DomainAccessItem: Identifiable {
@@ -202,6 +204,12 @@ struct DomainsPage: View {
                                             .accessibilityLabel("\(binding.isNull ? "服务绑定" : "管理绑定")，\(name)")
                                             .disabled(!record["bindingEligible"].bool || dnsLoading || loading)
                                             .help(record["bindingEligible"].bool ? "为此域名选择部署服务" : record["bindingDisabledReason"].string)
+                                        if record["bindingEligible"].bool && record["fqdn"].string != domain["name"].string {
+                                            Button("HTTPS") { openCertificate(record["fqdn"].string, binding: binding) }
+                                                .buttonStyle(DeploySecondaryButtonStyle())
+                                                .accessibilityLabel("配置 HTTPS 证书，\(name)")
+                                                .disabled(dnsLoading || loading)
+                                        }
                                         Menu {
                                             Button("复制主机记录") { copyDNSRecordText(record["rr"].string) }
                                             Button("复制域名") { copyDNSRecordText(name) }
@@ -338,6 +346,11 @@ struct DomainsPage: View {
                         refreshDomainData(domain)
                     }.environmentObject(model)
                 }
+            case .certificate:
+                if let fqdn = request.fqdn {
+                    DomainCertificateView(fqdn: fqdn, suggestedServerID: request.serverID ?? "")
+                        .environmentObject(model)
+                }
             }
         }
         .confirmationDialog("移除主域名？", isPresented: Binding(get: { deleteDomain != nil }, set: { if !$0 { deleteDomain = nil } })) {
@@ -382,6 +395,11 @@ struct DomainsPage: View {
                     else { sheet = DomainSheetRequest(kind: .binding, domain: domain, host: host) }
                 }.buttonStyle(DeploySecondaryButtonStyle()).disabled(loading)
                     .accessibilityLabel("\(binding.isNull ? "绑定服务" : "管理绑定")，\(item.fqdn)")
+                if item.fqdn != domain["name"].string {
+                    Button("HTTPS") { openCertificate(item.fqdn, binding: binding) }
+                        .buttonStyle(DeploySecondaryButtonStyle())
+                        .accessibilityLabel("配置 HTTPS 证书，\(item.fqdn)")
+                }
                 Group {
                     if item.host != nil && host["label"].string != "@" {
                         Menu {
@@ -407,6 +425,15 @@ struct DomainsPage: View {
         } else {
             sheet = DomainSheetRequest(kind: .dnsBinding, domain: domain, recordID: record.id)
         }
+    }
+
+    private func openCertificate(_ fqdn: String, binding: J) {
+        let deploymentServerID = model.deployments.first(where: { $0.id == binding["deploymentId"].string })?["serverId"].string ?? ""
+        let recordAddresses = Set(dnsRecords.filter { $0["fqdn"].string == fqdn && ["A", "AAAA"].contains($0["type"].string) }
+            .map { $0["value"].string })
+        let resolvedServerID = model.servers.first(where: { recordAddresses.contains($0["host"].string) })?.id ?? ""
+        sheet = DomainSheetRequest(kind: .certificate, fqdn: fqdn,
+                                   serverID: deploymentServerID.isEmpty ? resolvedServerID : deploymentServerID)
     }
 
     private func deploymentName(_ id: String) -> String {

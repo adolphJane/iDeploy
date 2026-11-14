@@ -1,6 +1,21 @@
 import Foundation
 import Darwin
 
+enum SharedSyncDateText {
+    static func localDateTime(_ value: String) -> String {
+        guard !value.isEmpty else { return "尚未同步" }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let standard = ISO8601DateFormatter()
+        guard let date = fractional.date(from: value) ?? standard.date(from: value) else { return value }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter.string(from: date)
+    }
+}
+
 struct J: Identifiable {
     let raw: Any
 

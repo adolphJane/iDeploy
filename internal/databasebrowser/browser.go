@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +15,37 @@ import (
 	mysql "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
+
+var newDatabaseNamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,62}$`)
+
+// CreateDatabase uses a separate writable connection. Browser queries remain read-only.
+func CreateDatabase(ctx context.Context, connection Connection, password, name string) error {
+	name = strings.TrimSpace(name)
+	if !newDatabaseNamePattern.MatchString(name) {
+		return errors.New("数据库名称需以字母开头，只能包含字母、数字和下划线，最多 63 个字符")
+	}
+	if connection.Driver == DriverMySQL {
+		connection.DatabaseName = "" // The target database does not exist yet.
+	} else if connection.Driver != DriverPostgres {
+		return errors.New("不支持的数据库类型")
+	}
+	db, err := open(connection, password)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := db.PingContext(ctx); err != nil {
+		return fmt.Errorf("连接数据库服务器失败: %w", err)
+	}
+	statement := `CREATE DATABASE "` + name + `"`
+	if connection.Driver == DriverMySQL {
+		statement = "CREATE DATABASE `" + name + "` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+	}
+	if _, err := db.ExecContext(ctx, statement); err != nil {
+		return fmt.Errorf("创建 Database 失败（请检查名称是否已存在及账号是否有建库权限）: %w", err)
+	}
+	return nil
+}
 
 // Test verifies network reachability and authentication without reading user
 // tables. Callers keep the password outside persisted connection metadata.
@@ -343,6 +375,8 @@ func open(connection Connection, password string) (*sql.DB, error) {
 		config.WriteTimeout = 15 * time.Second
 		if connection.SSLMode == "require" {
 			config.TLSConfig = "true"
+		} else if connection.SSLMode == "skip-verify" {
+			config.TLSConfig = "skip-verify"
 		}
 		dsn = config.FormatDSN()
 		driver = "mysql"

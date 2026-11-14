@@ -25,8 +25,8 @@ func TestOpenAppliesMigrationsIdempotently(t *testing.T) {
 	if err := first.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&migrations); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if migrations != 17 {
-		t.Fatalf("expected 17 applied migrations, got %d", migrations)
+	if migrations != 23 {
+		t.Fatalf("expected 23 applied migrations, got %d", migrations)
 	}
 	if err := first.Close(); err != nil {
 		t.Fatalf("close first database: %v", err)
@@ -41,8 +41,41 @@ func TestOpenAppliesMigrationsIdempotently(t *testing.T) {
 	if err := second.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&migrations); err != nil {
 		t.Fatalf("count migrations after reopen: %v", err)
 	}
-	if migrations != 17 {
+	if migrations != 23 {
 		t.Fatalf("migration was not idempotent: got %d rows", migrations)
+	}
+}
+
+func TestSharedJobSummaryIncludesOnlyNewJobsWithoutPayload(t *testing.T) {
+	ctx := context.Background()
+	db, err := database.Open(ctx, filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	insert := `INSERT INTO jobs(id,type,payload,status,created_at,updated_at) VALUES(?, 'deployment.release', ?, 'queued','2026-01-01','2026-01-01')`
+	if _, err := db.ExecContext(ctx, insert, "old", `{"local":"opaque"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO shared_sync_state(id,server_id,mode) VALUES(1,'server','shared')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, insert, "new", `{"local":"opaque"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE jobs SET status='running',progress=42 WHERE id='new'`); err != nil {
+		t.Fatal(err)
+	}
+	var id, status string
+	var progress, count int
+	if err := db.QueryRowContext(ctx, `SELECT id,status,progress FROM shared_job_summaries`).Scan(&id, &status, &progress); err != nil {
+		t.Fatal(err)
+	}
+	if id != "new" || status != "running" || progress != 42 {
+		t.Fatalf("unexpected summary: %q %q %d", id, status, progress)
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM shared_job_summaries WHERE id='old'`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("old job leaked: %d %v", count, err)
 	}
 }
 

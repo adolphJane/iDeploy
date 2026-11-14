@@ -15,13 +15,13 @@ func TestBuildArgumentsSelectManagedBuilderAndLoadImage(t *testing.T) {
 	if got, want := composeBuildArguments("compose.yml", proxy), []string{"compose", "-f", "compose.yml", "build", "--pull", "--builder", "ideploy-proxy-test"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected Compose build arguments: %#v", got)
 	}
-	if got, want := containerBuildArguments("Dockerfile", "example/api:v1", ".", "linux/arm64", proxy), []string{"buildx", "build", "--builder", "ideploy-proxy-test", "--load", "--platform", "linux/arm64", "--pull", "-f", "Dockerfile", "-t", "example/api:v1", "."}; !reflect.DeepEqual(got, want) {
+	if got, want := containerBuildArguments("Dockerfile", "example/api:v1", ".", "linux/arm64", "/demo/", proxy), []string{"buildx", "build", "--builder", "ideploy-proxy-test", "--load", "--platform", "linux/arm64", "--pull", "--build-arg", "IDEPLOY_BASE_PATH=/demo/", "-f", "Dockerfile", "-t", "example/api:v1", "."}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected proxied container build arguments: %#v", got)
 	}
 }
 
 func TestBuildArgumentsKeepDockerBuildWhenProxyDisabled(t *testing.T) {
-	if got, want := containerBuildArguments("Dockerfile", "example/api:v1", ".", "linux/amd64", buildProxyRuntime{}), []string{"build", "--platform", "linux/amd64", "--pull", "-f", "Dockerfile", "-t", "example/api:v1", "."}; !reflect.DeepEqual(got, want) {
+	if got, want := containerBuildArguments("Dockerfile", "example/api:v1", ".", "linux/amd64", "/draw/", buildProxyRuntime{}), []string{"build", "--platform", "linux/amd64", "--pull", "--build-arg", "IDEPLOY_BASE_PATH=/draw/", "-f", "Dockerfile", "-t", "example/api:v1", "."}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected default container build arguments: %#v", got)
 	}
 }

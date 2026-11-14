@@ -343,9 +343,13 @@ type DeploymentInput struct {
 }
 
 type DeploymentReleaseInput struct {
-	DeploymentID string `json:"deploymentId"`
-	RegistryID   string `json:"registryId"`
-	Version      string `json:"version"`
+	DeploymentID  string `json:"deploymentId"`
+	RegistryID    string `json:"registryId"`
+	Version       string `json:"version"`
+	FQDN          string `json:"fqdn"`
+	PathPrefix    string `json:"pathPrefix"`
+	ServiceName   string `json:"serviceName"`
+	ContainerPort int    `json:"containerPort"`
 }
 
 type DeploymentVersionSuggestionView struct {
@@ -403,8 +407,10 @@ type DeploymentView struct {
 // typed interface to the native UI, CLI, and MCP.
 type SystemService struct {
 	mu                sync.RWMutex
+	sharedWriteMu     sync.Mutex
 	preflightMu       sync.RWMutex
 	preflightProgress map[string]preflightProgressEntry
+	vaultKey          []byte
 
 	db             *sql.DB
 	store          *job.Store
@@ -527,6 +533,16 @@ func (s *SystemService) startWithPaths(ctx context.Context, serveControl bool, p
 		_ = runtimeLock.Release()
 		return err
 	}
+	if err := domain.NewStore(db).ReconcileInterruptedPathRoutes(ctx); err != nil {
+		db.Close()
+		_ = runtimeLock.Release()
+		return err
+	}
+	if err := domain.NewStore(db).ReconcileInterruptedInternalIngresses(ctx); err != nil {
+		db.Close()
+		_ = runtimeLock.Release()
+		return err
+	}
 
 	runner := job.NewRunner(store, func(value job.Job) {
 		s.mu.RLock()
@@ -551,6 +567,10 @@ func (s *SystemService) startWithPaths(ctx context.Context, serveControl bool, p
 	runner.Register("domain.binding.remove", s.domainBindingHandler)
 	runner.Register("domain.external.apply", s.externalRouteHandler)
 	runner.Register("domain.external.remove", s.externalRouteHandler)
+	runner.Register("domain.path.apply", s.sharedPathHandler)
+	runner.Register("domain.path.remove", s.sharedPathHandler)
+	runner.Register("shared.server.deploy", s.sharedServerDeployHandler)
+	runner.Register("internal.ingress.deploy", s.internalIngressDeployHandler)
 
 	s.mu.Lock()
 	s.db = db
@@ -725,6 +745,18 @@ func (s *SystemService) ListDatabaseSchemas(id string) ([]DatabaseSchemaView, er
 		result = append(result, DatabaseSchemaView{Name: value.Name})
 	}
 	return result, nil
+}
+
+func (s *SystemService) CreateRemoteDatabase(id, name string) (DatabaseSchemaView, error) {
+	_, connection, password, ctx, cancel, err := s.databaseConnectionContext(id, 20*time.Second)
+	if err != nil {
+		return DatabaseSchemaView{}, err
+	}
+	defer cancel()
+	if err := databasebrowser.CreateDatabase(ctx, connection, password, name); err != nil {
+		return DatabaseSchemaView{}, err
+	}
+	return DatabaseSchemaView{Name: strings.TrimSpace(name)}, nil
 }
 
 func (s *SystemService) GetDatabaseOverview(id, schema string) (DatabaseOverviewView, error) {
@@ -1241,6 +1273,15 @@ func (s *SystemService) DeleteDeployment(id string) error {
 	} else if len(domains) > 0 {
 		return errors.New("请先在域名页面移除该部署的绑定草稿，再删除部署")
 	}
+	if paths, err := s.ListSharedPathRoutes(); err != nil {
+		return err
+	} else {
+		for _, route := range paths {
+			if route.DeploymentID == id {
+				return errors.New("请先在域名页面移除该部署的共享域名路径，再删除部署")
+			}
+		}
+	}
 	deployments, err := s.deploymentStore()
 	if err != nil {
 		return err
@@ -1750,7 +1791,7 @@ func (s *SystemService) DeleteServer(id string) error {
 		return err
 	}
 	if used > 0 {
-		return errors.New("请先在域名页面移除此服务器部署的绑定草稿，再删除服务器")
+		return errors.New("请先移除此服务器的域名绑定、项目路径和内部应用入口，再删除服务器")
 	}
 	if ingress, err := store.HasServerIngress(ctx, id); err != nil {
 		return err
@@ -1782,6 +1823,8 @@ func (s *SystemService) DeleteServer(id string) error {
 		_ = server.DeletePassword(ctx, connection.CredentialRef)
 	}
 	_ = server.DeletePassword(ctx, server.AgentPairingCredentialRef(id))
+	_ = server.DeletePassword(ctx, server.SharedServerTokenCredentialRef(id))
+	_ = server.DeletePassword(ctx, server.SharedVaultKeyCredentialRef(id))
 	cleanupEnvironmentSecrets(ctx, environmentRefs)
 	return nil
 }
@@ -2025,6 +2068,10 @@ func (s *SystemService) GetOverview() (Overview, error) {
 	if err != nil {
 		return Overview{}, err
 	}
+	jobViews, err := s.mergeSharedJobSummaries(ctx, mapJobs(jobs))
+	if err != nil {
+		return Overview{}, err
+	}
 
 	return Overview{
 		Version:       appVersion,
@@ -2040,7 +2087,7 @@ func (s *SystemService) GetOverview() (Overview, error) {
 			inspectTool(ctx, "Git", "git", "--version"),
 			inspectTool(ctx, "SSH", "ssh", "-V"),
 		},
-		Jobs: mapJobs(jobs),
+		Jobs: jobViews,
 	}, nil
 }
 

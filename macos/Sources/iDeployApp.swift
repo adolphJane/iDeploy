@@ -85,7 +85,7 @@ struct IDeployApp: App {
             CommandMenu("操作") {
                 Button("刷新") { Task { await model.refreshFromUser() } }
                     .keyboardShortcut("r")
-                    .disabled(model.busy || (model.section == .domains && model.domainDataLoading))
+                    .disabled(!model.ready || model.manualRefreshInProgress)
                 Divider()
                 Button("总览") { model.section = .overview }.keyboardShortcut("1")
                 Button("部署") { model.section = .deployments }.keyboardShortcut("2")

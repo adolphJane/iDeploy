@@ -77,7 +77,7 @@ func localSourceRevision(ctx context.Context, root string) string {
 	return "local-" + time.Now().UTC().Format("20060102T150405Z")
 }
 
-func buildAndPushRelease(ctx context.Context, source preparedSource, value project.Project, target deployment.Target, registryValue registry.Connection, registryPassword, version, platform string, buildProxy buildProxyRuntime, reporter job.Reporter, stage func(deployment.ReleaseStatus, string) error) (imageRef, manifest string, err error) {
+func buildAndPushRelease(ctx context.Context, source preparedSource, value project.Project, target deployment.Target, registryValue registry.Connection, registryPassword, version, platform, basePath string, buildProxy buildProxyRuntime, reporter job.Reporter, stage func(deployment.ReleaseStatus, string) error) (imageRef, manifest string, err error) {
 	docker, err := toolchain.ResolveExecutable(ctx, "docker")
 	if err != nil {
 		return "", "", err
@@ -88,7 +88,7 @@ func buildAndPushRelease(ctx context.Context, source preparedSource, value proje
 	if _, err := runLocalCommandInput(ctx, "", nil, registryPassword+"\n", docker.Path, "login", registry.DockerHost(registryValue.Endpoint), "--username", registryValue.Username, "--password-stdin"); err != nil {
 		return "", "", fmt.Errorf("登录本机 Docker 镜像仓库失败，请核对用户名、密码或 Token: %w", err)
 	}
-	environment := append(os.Environ(), "IMAGE_TAG="+version, "DOCKER_DEFAULT_PLATFORM="+platform)
+	environment := append(os.Environ(), "IMAGE_TAG="+version, "DOCKER_DEFAULT_PLATFORM="+platform, "IDEPLOY_BASE_PATH="+basePath)
 	if target.WorkloadKind == "compose" {
 		if value.ComposePath == "" {
 			return "", "", errors.New("Compose 发布需要在项目中配置 Compose 文件")
@@ -172,7 +172,7 @@ func buildAndPushRelease(ctx context.Context, source preparedSource, value proje
 		return "", "", err
 	}
 	reporter.Progress(28, "正在构建镜像 "+imageRef+" · "+platform)
-	buildArguments := containerBuildArguments(dockerfile, imageRef, contextDir, platform, buildProxy)
+	buildArguments := containerBuildArguments(dockerfile, imageRef, contextDir, platform, basePath, buildProxy)
 	if _, err := runLocalCommand(ctx, source.root, nil, docker.Path, buildArguments...); err != nil {
 		return "", "", explainDockerBuildError(err, dockerfile)
 	}
@@ -199,11 +199,11 @@ func composeBuildArguments(composeFile string, buildProxy buildProxyRuntime) []s
 	return arguments
 }
 
-func containerBuildArguments(dockerfile, imageRef, contextDir, platform string, buildProxy buildProxyRuntime) []string {
+func containerBuildArguments(dockerfile, imageRef, contextDir, platform, basePath string, buildProxy buildProxyRuntime) []string {
 	if buildProxy.BuilderName != "" {
-		return []string{"buildx", "build", "--builder", buildProxy.BuilderName, "--load", "--platform", platform, "--pull", "-f", dockerfile, "-t", imageRef, contextDir}
+		return []string{"buildx", "build", "--builder", buildProxy.BuilderName, "--load", "--platform", platform, "--pull", "--build-arg", "IDEPLOY_BASE_PATH=" + basePath, "-f", dockerfile, "-t", imageRef, contextDir}
 	}
-	return []string{"build", "--platform", platform, "--pull", "-f", dockerfile, "-t", imageRef, contextDir}
+	return []string{"build", "--platform", platform, "--pull", "--build-arg", "IDEPLOY_BASE_PATH=" + basePath, "-f", dockerfile, "-t", imageRef, contextDir}
 }
 
 func runtimeTaggedImageReference(pinnedImage, version string) (string, error) {
@@ -379,6 +379,18 @@ func (s *SystemService) deploymentReleaseHandler(ctx context.Context, task job.J
 	if err != nil {
 		return err
 	}
+	if err := s.validateReleasePathReady(ctx, release.ID, target.ServerID); err != nil {
+		return err
+	}
+	basePath, err := s.releaseBasePath(ctx, release)
+	if err != nil {
+		return err
+	}
+	ctx, releaseLease, err := s.leaseSharedPublication(ctx, target.ServerID, task.ID)
+	if err != nil {
+		return err
+	}
+	defer releaseLease()
 	projects, err := s.projectStore()
 	if err != nil {
 		return err
@@ -452,11 +464,14 @@ func (s *SystemService) deploymentReleaseHandler(ctx context.Context, task job.J
 			}
 			target.ContainerPorts = resolvedPorts
 		}
+		if err := s.validateReleaseContainerPort(ctx, release.ID, target.ContainerPorts); err != nil {
+			return err
+		}
 	}
 	if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleaseBuilding, "正在构建镜像", "", source.revision, ""); err != nil {
 		return err
 	}
-	imageRef, manifest, err := buildAndPushRelease(ctx, source, projectValue, target, registryValue, registryPassword, release.Version, platform, buildProxy, reporter, func(status deployment.ReleaseStatus, detail string) error {
+	imageRef, manifest, err := buildAndPushRelease(ctx, source, projectValue, target, registryValue, registryPassword, release.Version, platform, basePath, buildProxy, reporter, func(status deployment.ReleaseStatus, detail string) error {
 		return deployments.UpdateRelease(ctx, release.ID, status, detail, "", source.revision, "")
 	})
 	if err != nil {
@@ -503,7 +518,9 @@ func (s *SystemService) deploymentReleaseHandler(ctx context.Context, task job.J
 		reporter.Progress(74, "正在创建或更新远端容器")
 		return s.deployAndCheckContainer(ctx, deployments, release, target, host, task.ID, reporter, remote, imageRef, runtimeImageRef, source.revision, manifest)
 	}
-	return s.finishReleaseHealthCheck(ctx, deployments, release, target, host, reporter, imageRef, source.revision, manifest, nil)
+	return s.finishReleaseHealthCheck(ctx, deployments, release, target, host, reporter, imageRef, source.revision, manifest, func() error {
+		return s.applyReleasePath(ctx, release.ID, task.ID, host)
+	})
 }
 
 func (s *SystemService) deploymentRollbackHandler(ctx context.Context, task job.Job, reporter job.Reporter) error {
@@ -551,6 +568,11 @@ func (s *SystemService) deploymentArtifactHandler(ctx context.Context, task job.
 	if rollback && source.Status != deployment.ReleaseSucceeded {
 		return errors.New("只能回滚到当前部署目标的成功版本")
 	}
+	if rollback {
+		if err := s.validateRollbackBasePath(ctx, source); err != nil {
+			return err
+		}
+	}
 	if !rollback && (source.Action != "deploy" || (source.Status != deployment.ReleaseFailed && source.Status != deployment.ReleaseCanceled)) {
 		return errors.New("只能恢复当前部署目标失败或取消的普通发布")
 	}
@@ -561,6 +583,16 @@ func (s *SystemService) deploymentArtifactHandler(ctx context.Context, task job.
 	if err != nil {
 		return err
 	}
+	if !rollback {
+		if err := s.validateReleasePathReady(ctx, release.ID, target.ServerID); err != nil {
+			return err
+		}
+	}
+	ctx, releaseLease, err := s.leaseSharedPublication(ctx, target.ServerID, task.ID)
+	if err != nil {
+		return err
+	}
+	defer releaseLease()
 	servers, err := s.serverStore()
 	if err != nil {
 		return err
@@ -661,7 +693,9 @@ func (s *SystemService) deploymentArtifactHandler(ctx context.Context, task job.
 		}
 		return s.deployAndCheckContainer(ctx, deployments, release, target, host, task.ID, reporter, remote, source.ImageRef, runtimeImageRef, source.SourceRevision, source.Manifest)
 	}
-	return s.finishReleaseHealthCheck(ctx, deployments, release, target, host, reporter, source.ImageRef, source.SourceRevision, source.Manifest, nil)
+	return s.finishReleaseHealthCheck(ctx, deployments, release, target, host, reporter, source.ImageRef, source.SourceRevision, source.Manifest, func() error {
+		return s.applyReleasePath(ctx, release.ID, task.ID, host)
+	})
 }
 
 func (s *SystemService) deployAndCheckContainer(ctx context.Context, deployments *deployment.Store, release deployment.Release, target deployment.Target, host server.Connection, jobID string, reporter job.Reporter, remote *server.Remote, imageRef, runtimeImageRef, revision, manifest string) error {
@@ -670,6 +704,13 @@ func (s *SystemService) deployAndCheckContainer(ctx context.Context, deployments
 		return err
 	}
 	target = currentTarget
+	basePath, err := s.releaseBasePath(ctx, release)
+	if err != nil {
+		return err
+	}
+	if basePath != "" {
+		environment["IDEPLOY_BASE_PATH"] = basePath
+	}
 	if err := deployments.SetReleaseEnvironmentRevision(ctx, release.ID, target.EnvironmentRevision); err != nil {
 		return err
 	}
@@ -686,7 +727,12 @@ func (s *SystemService) deployAndCheckContainer(ctx context.Context, deployments
 		return err
 	}
 	committed := false
+	pathApplied := false
 	err = s.finishReleaseHealthCheck(ctx, deployments, release, target, host, reporter, imageRef, revision, manifest, func() error {
+		if err := s.applyReleasePath(ctx, release.ID, jobID, host); err != nil {
+			return err
+		}
+		pathApplied = release.Action == "deploy"
 		commitErr := remote.CommitContainerReplacementWithAgent(ctx, host, target.ServerID, jobID, replacement)
 		if commitErr == nil {
 			committed = true
@@ -701,6 +747,10 @@ func (s *SystemService) deployAndCheckContainer(ctx context.Context, deployments
 	}
 	if committed {
 		return fmt.Errorf("%w；新容器已通过健康检查并完成替换，但发布记录收尾失败", err)
+	}
+	var ingressStateError appliedIngressStateError
+	if pathApplied || errors.As(err, &ingressStateError) {
+		return fmt.Errorf("%w；Nginx 已指向新容器，保留新容器以避免中断访问，请核对入口状态后重试", err)
 	}
 	restoreContext, cancel := context.WithTimeout(context.Background(), 75*time.Second)
 	defer cancel()
@@ -753,7 +803,7 @@ func (s *SystemService) finishReleaseHealthCheck(ctx context.Context, deployment
 			if healthy {
 				if onHealthy != nil {
 					if err := onHealthy(); err != nil {
-						return fmt.Errorf("清理上一容器失败: %w", err)
+						return fmt.Errorf("发布收尾失败: %w", err)
 					}
 				}
 				if err := deployments.SaveSnapshot(ctx, host.ID, containers); err != nil {

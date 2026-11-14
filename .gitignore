@@ -3,6 +3,7 @@
 # Local credentials, signing material and private UI audit captures
 .env
 .env.*
+build/shared-server/secrets/
 !.env.example
 *.pem
 *.key

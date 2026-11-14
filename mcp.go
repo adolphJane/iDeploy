@@ -22,7 +22,7 @@ const (
 	mcpMaximumTimeout   = 24 * time.Hour
 )
 
-const mcpInstructions = `Use list tools to resolve project, server, domain, deployment, registry, release, and job IDs before referencing existing resources. Project, deployment, deployment-environment, and build-proxy configuration tools only save local iDeploy configuration; they do not publish or change remote workloads. Supply a stable request_id for configuration writes and use get_operation after operation_pending or an uncertain local-control timeout. Run preflight_deployment before publishing; supply a unique request_id and call get_preflight_progress to observe a long-running check. Publishing automatically uses the global build proxy policy returned by get_build_proxy_settings and blocks known host-port conflicts before building. Plain deployment environment variables may be managed through MCP; use request_deployment_secret_input for secrets so their values are entered in a local hidden-input dialog and never pass through MCP. A single-container restart recreates the container to apply current runtime configuration. Remote workload and server Agent mutation tools must only be called after the user explicitly requests the exact action. retry_release safely rebuilds failures without an artifact and directly resumes deployment when an immutable pushed artifact was retained. Do not automatically retry other mutations after a timeout; inspect list_jobs or get_job first. Never request, expose, or return registry credentials, SSH credentials, deployment secrets, or Keychain values. Asynchronous operations require iDeploy.app to be running; otherwise use the default wait=true behavior.`
+const mcpInstructions = `Use list tools to resolve project, server, domain, deployment, registry, release, and job IDs before referencing existing resources. Project, deployment, deployment-environment, and build-proxy configuration tools only save local iDeploy configuration; they do not publish or change remote workloads. Supply a stable request_id for configuration writes and use get_operation after operation_pending or an uncertain local-control timeout. Use list_internal_ingresses to choose a ready HTTPS ingress on the deployment server. Run preflight_deployment before publishing with the same domain, path, container_port, and optional service_name as publish_deployment; supply a unique request_id and call get_preflight_progress to observe a long-running check. Publishing automatically uses the global build proxy policy returned by get_build_proxy_settings and blocks known host-port conflicts before building. Plain deployment environment variables may be managed through MCP; use request_deployment_secret_input for secrets so their values are entered in a local hidden-input dialog and never pass through MCP. A single-container restart recreates the container to apply current runtime configuration. Remote workload and server Agent mutation tools must only be called after the user explicitly requests the exact action. retry_release safely rebuilds failures without an artifact and directly resumes deployment when an immutable pushed artifact was retained. Do not automatically retry other mutations after a timeout; inspect list_jobs or get_job first. Never request, expose, or return registry credentials, SSH credentials, deployment secrets, or Keychain values. Asynchronous operations require iDeploy.app to be running; otherwise use the default wait=true behavior.`
 
 type mcpRequestExecutor func(context.Context, cliRequest) cliResponse
 
@@ -172,9 +172,13 @@ type mcpDeploymentSecretPromptInput struct {
 }
 
 type mcpPreflightDeploymentInput struct {
-	DeploymentID string `json:"deployment_id" jsonschema:"stable deployment identifier returned by list_deployments"`
-	RegistryID   string `json:"registry_id" jsonschema:"registry identifier intended for the next publish"`
-	RequestID    string `json:"request_id,omitempty" jsonschema:"optional unique progress key; pass to get_preflight_progress while the check runs"`
+	DeploymentID  string `json:"deployment_id" jsonschema:"stable deployment identifier returned by list_deployments"`
+	RegistryID    string `json:"registry_id" jsonschema:"registry identifier intended for the next publish"`
+	RequestID     string `json:"request_id,omitempty" jsonschema:"optional unique progress key; pass to get_preflight_progress while the check runs"`
+	FQDN          string `json:"domain,omitempty" jsonschema:"configured internal HTTPS ingress domain for the next publish"`
+	PathPrefix    string `json:"path,omitempty" jsonschema:"single-segment project path for the next publish"`
+	ServiceName   string `json:"service_name,omitempty" jsonschema:"container or Compose service name when multiple backends share a port"`
+	ContainerPort int    `json:"container_port,omitempty" jsonschema:"application HTTP container port for the next publish"`
 }
 
 type mcpJobInput struct {
@@ -196,6 +200,10 @@ type mcpPublishInput struct {
 	DeploymentID   string `json:"deployment_id" jsonschema:"stable deployment identifier returned by list_deployments"`
 	RegistryID     string `json:"registry_id" jsonschema:"stable registry identifier returned by list_registries"`
 	Version        string `json:"version,omitempty" jsonschema:"optional release version; iDeploy generates one when omitted"`
+	FQDN           string `json:"domain" jsonschema:"configured internal HTTPS ingress domain"`
+	PathPrefix     string `json:"path" jsonschema:"single-segment project path under the domain"`
+	ServiceName    string `json:"service_name,omitempty" jsonschema:"container or Compose service name when multiple backends share a port"`
+	ContainerPort  int    `json:"container_port" jsonschema:"application HTTP container port, between 1 and 65535"`
 	Wait           *bool  `json:"wait,omitempty" jsonschema:"wait for publishing to finish; defaults to true"`
 	TimeoutSeconds int    `json:"timeout_seconds,omitempty" jsonschema:"operation timeout in seconds; defaults to 1800 and cannot exceed 86400"`
 }
@@ -305,6 +313,11 @@ func registerMCPReadTools(server *mcp.Server, service *mcpService) {
 	}, mcpReadTimeout, listRequest("domain.list"), "Listed iDeploy domains.")
 
 	registerMCPCommandTool(server, service, &mcp.Tool{
+		Name: "list_internal_ingresses", Description: "List configured internal HTTPS ingress domains, their server IDs, and readiness before choosing a publish domain.",
+		Annotations: mcpReadAnnotations("List internal HTTPS ingresses", false),
+	}, mcpReadTimeout, listRequest("internal.ingress.list"), "Listed internal HTTPS ingresses.")
+
+	registerMCPCommandTool(server, service, &mcp.Tool{
 		Name: "list_domain_hosts", Description: "List locally managed domain hosts and binding drafts for a root domain.",
 		Annotations: mcpReadAnnotations("List domain hosts", false),
 	}, mcpReadTimeout, func(input mcpDomainInput) (cliRequest, error) {
@@ -408,7 +421,7 @@ func registerMCPReadTools(server *mcp.Server, service *mcpService) {
 		if err := requireMCPValue("registry_id", input.RegistryID); err != nil {
 			return cliRequest{}, err
 		}
-		return cliRequest{Command: "deployment.preflight", ID: strings.TrimSpace(input.DeploymentID), RegistryID: strings.TrimSpace(input.RegistryID), RequestID: strings.TrimSpace(input.RequestID)}, nil
+		return cliRequest{Command: "deployment.preflight", ID: strings.TrimSpace(input.DeploymentID), RegistryID: strings.TrimSpace(input.RegistryID), RequestID: strings.TrimSpace(input.RequestID), FQDN: strings.TrimSpace(input.FQDN), PathPrefix: strings.TrimSpace(input.PathPrefix), ServiceName: strings.TrimSpace(input.ServiceName), ContainerPort: input.ContainerPort}, nil
 	}, "Completed deployment preflight checks.")
 
 	registerMCPCommandTool(server, service, &mcp.Tool{
@@ -707,6 +720,15 @@ func registerMCPMutationTools(server *mcp.Server, service *mcpService) {
 		if err := requireMCPValue("registry_id", input.RegistryID); err != nil {
 			return cliRequest{}, err
 		}
+		if err := requireMCPValue("domain", input.FQDN); err != nil {
+			return cliRequest{}, err
+		}
+		if err := requireMCPValue("path", input.PathPrefix); err != nil {
+			return cliRequest{}, err
+		}
+		if input.ContainerPort < 1 || input.ContainerPort > 65535 {
+			return cliRequest{}, errors.New("container_port must be between 1 and 65535")
+		}
 		timeout, err := mcpTimeout(input.TimeoutSeconds, mcpOperationTimeout)
 		if err != nil {
 			return cliRequest{}, err
@@ -714,6 +736,7 @@ func registerMCPMutationTools(server *mcp.Server, service *mcpService) {
 		return cliRequest{
 			Command: "deployment.publish", ID: strings.TrimSpace(input.DeploymentID),
 			RegistryID: strings.TrimSpace(input.RegistryID), Version: strings.TrimSpace(input.Version),
+			FQDN: strings.TrimSpace(input.FQDN), PathPrefix: strings.TrimSpace(input.PathPrefix), ServiceName: strings.TrimSpace(input.ServiceName), ContainerPort: input.ContainerPort,
 			Wait: mcpWait(input.Wait), TimeoutMS: timeout.Milliseconds(),
 		}, nil
 	}, "Deployment publishing completed or was queued.")

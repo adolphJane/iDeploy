@@ -35,11 +35,51 @@ type CertbotCheck struct {
 	CertbotAvailable bool             `json:"certbotAvailable"`
 	ExistingAccount  bool             `json:"existingAccount"`
 	NginxContainer   string           `json:"nginxContainer,omitempty"`
+	SuggestedWebroot string           `json:"suggestedWebroot,omitempty"`
 	CertificateMount bool             `json:"certificateMount"`
 	ChallengeReady   bool             `json:"challengeReady"`
 	DNSReady         bool             `json:"dnsReady"`
 	Existing         *CertificateInfo `json:"existing,omitempty"`
 	Detail           string           `json:"detail,omitempty"`
+}
+
+var acmeRootPattern = regexp.MustCompile(`(?s)location\s+\^~\s+/\.well-known/acme-challenge/\s*\{[^}]*?\broot\s+([^;\s]+)\s*;`)
+
+func suggestedACMEWebroot(config string, mounts []dockerMount) string {
+	matches := acmeRootPattern.FindAllStringSubmatch(config, -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	var suggested string
+	for _, match := range matches {
+		containerRoot := filepath.Clean(match[1])
+		if !filepath.IsAbs(containerRoot) {
+			return ""
+		}
+		var hostRoot string
+		for _, mount := range mounts {
+			if mount.Type != "bind" || !filepath.IsAbs(mount.Source) || !filepath.IsAbs(mount.Destination) {
+				continue
+			}
+			destination := filepath.Clean(mount.Destination)
+			if destination == "/" || destination == "/etc" {
+				continue
+			}
+			if containerRoot != destination && !strings.HasPrefix(containerRoot, destination+string(os.PathSeparator)) {
+				continue
+			}
+			relative, err := filepath.Rel(destination, containerRoot)
+			if err == nil {
+				hostRoot = filepath.Clean(filepath.Join(mount.Source, relative))
+				break
+			}
+		}
+		if hostRoot == "" || suggested != "" && suggested != hostRoot {
+			return ""
+		}
+		suggested = hostRoot
+	}
+	return suggested
 }
 
 type dockerMount struct {
@@ -221,6 +261,9 @@ func CheckCertbot(ctx context.Context, domain, webroot string) (CertbotCheck, er
 		return value, nil
 	}
 	value.NginxContainer = snapshot.Container
+	if mounts, err := nginxMounts(ctx, snapshot.Container); err == nil {
+		value.SuggestedWebroot = suggestedACMEWebroot(snapshot.Effective, mounts)
+	}
 	if _, err := certbotMount(ctx, snapshot.Container); err == nil {
 		value.CertificateMount = true
 	} else {

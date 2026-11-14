@@ -5,6 +5,78 @@ private struct DatabaseFormRequest: Identifiable {
     let connection: J?
 }
 
+private struct CreateRemoteDatabaseSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let connection: J
+    let onCreated: (String) -> Void
+    @State private var name = ""
+    @State private var creating = false
+    @State private var errorMessage = ""
+
+    private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var validName: Bool {
+        trimmedName.range(of: "^[A-Za-z][A-Za-z0-9_]{0,62}$", options: .regularExpression) != nil
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SectionHeading("创建 Database", "目标连接：\(connection["name"].string) · \(connection["host"].string)")
+                .padding(24)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(DeployStyle.overviewHeader)
+            Rectangle().fill(DeployStyle.line).frame(height: 1)
+            VStack(alignment: .leading, spacing: 12) {
+                Text("数据库名称")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(DeployStyle.ink)
+                TextField("例如 app_data", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(creating)
+                Text("以字母开头，仅使用字母、数字和下划线，最多 63 个字符。此操作会在远程数据库服务器上创建新库。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(DeployStyle.muted)
+                if !errorMessage.isEmpty {
+                    Text(errorMessage).foregroundStyle(.red).textSelection(.enabled)
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(DeployStyle.canvas)
+            Rectangle().fill(DeployStyle.line).frame(height: 1)
+            HStack(spacing: 12) {
+                Spacer()
+                Button("取消") { dismiss() }
+                    .buttonStyle(DeploySecondaryButtonStyle(height: 34))
+                    .disabled(creating)
+                Button(creating ? "正在创建…" : "创建 Database") {
+                    guard validName else {
+                        errorMessage = "请输入符合规则的数据库名称。"
+                        return
+                    }
+                    creating = true
+                    errorMessage = ""
+                    Task {
+                        defer { creating = false }
+                        do {
+                            _ = try await NativeBridge.call("CreateRemoteDatabase", [connection.id, trimmedName], timeoutSeconds: 25)
+                            onCreated(trimmedName)
+                            dismiss()
+                        } catch {
+                            errorMessage = error.localizedDescription
+                        }
+                    }
+                }
+                .buttonStyle(DeployPrimaryButtonStyle())
+                .disabled(creating)
+            }
+            .padding(16)
+            .background(DeployStyle.overviewPanel)
+        }
+        .frame(width: 480)
+        .environment(\.colorScheme, .light)
+    }
+}
+
 struct DatabasesPage: View {
     @EnvironmentObject private var model: AppModel
     @State private var selectedID: String?
@@ -20,6 +92,7 @@ struct DatabasesPage: View {
     @State private var sortDesc = false
     @State private var tab = 0
     @State private var formRequest: DatabaseFormRequest?
+    @State private var createDatabaseConnection: J?
     @State private var deleteTarget: J?
     @State private var browserMessage = ""
     @State private var connectionMessage = ""
@@ -184,6 +257,11 @@ struct DatabasesPage: View {
                 .environmentObject(model)
                 .id(request.id)
         }
+        .sheet(item: $createDatabaseConnection) { connection in
+            CreateRemoteDatabaseSheet(connection: connection) { name in
+                loadSchemas(connection.id, selecting: name)
+            }
+        }
         .onChange(of: selectedID) { _ in
             schema = ""
             schemas = []
@@ -231,12 +309,17 @@ struct DatabasesPage: View {
             HStack {
                 SectionHeading("浏览数据", "选择 Schema 和数据表，以只读方式查看内容")
                 Spacer()
-                Label("只读", systemImage: "eye")
+                Label("数据浏览只读", systemImage: "eye")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(DeployStyle.green)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
                     .background(DeployStyle.greenSoft, in: Capsule())
+                Button { createDatabaseConnection = connection } label: {
+                    Label("创建 Database", systemImage: "plus")
+                }
+                .buttonStyle(DeploySecondaryButtonStyle())
+                .help("在 \(connection["name"].string) 连接的服务器上创建新数据库")
             }
             if !browserMessage.isEmpty {
                 Text(browserMessage)
@@ -502,7 +585,7 @@ struct DatabasesPage: View {
         .background(DeployStyle.overviewPanel)
     }
 
-    private func loadSchemas(_ id: String) {
+    private func loadSchemas(_ id: String, selecting preferredName: String? = nil) {
         Task {
             loadingSchemas = true
             browserMessage = ""
@@ -511,7 +594,8 @@ struct DatabasesPage: View {
                 guard selectedID == id else { return }
                 loadingSchemas = false
                 schemas = loaded
-                schema = loaded.first?["name"].string ?? ""
+                schema = preferredName.flatMap { name in loaded.first { $0["name"].string == name }?["name"].string }
+                    ?? loaded.first?["name"].string ?? ""
                 if schema.isEmpty { tables = [] }
             } catch {
                 guard selectedID == id else { return }

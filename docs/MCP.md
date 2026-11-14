@@ -44,6 +44,7 @@ codex mcp list
 - `list_servers`
 - `get_server_agent_status`（Agent 状态、版本和 CPU／内存／存储指标）
 - `list_domains`
+- `list_internal_ingresses`（查看内部 HTTPS 入口绑定的域名、服务器及就绪状态）
 - `list_domain_hosts`
 - `list_dns_records`（从已连接的 DNS 服务商实时读取）
 - `list_remote_containers`
@@ -97,19 +98,21 @@ codex mcp list
 
 Agent 安装、更新和卸载会返回任务 ID，可用 `get_job` 或 `wait_job` 跟踪。卸载会删除远端 Agent 和本机配对凭据，保留现有容器与证书。域名与 DNS 工具目前只提供查询，DNS 记录编辑、证书申请和入口代理变更仍由桌面端执行。项目 Dockerfile／Compose 可能包含明文凭据，MCP 暂不提供文件原文的读取与编辑工具。
 
-`preflight_deployment` 可传入唯一 `request_id`，检查运行期间使用同一 ID 调用 `get_preflight_progress` 可获取当前阶段和已完成检查。发布前检查最多等待 3 分钟；进度完成后仅短时间保留。
+`preflight_deployment` 还需传入与下一次发布相同的 `domain`、`path`、`container_port`，多个后端共用端口时传入 `service_name`。可传入唯一 `request_id`，检查运行期间使用同一 ID 调用 `get_preflight_progress` 获取进度。发布前检查最多等待 3 分钟；进度完成后仅短时间保留。
 
 配置写入可提供调用方生成的 `request_id`（8 到 128 个安全字符）。同一个请求不确定是否完成时，必须复用原 `request_id`，不能生成新 ID；iDeploy 会返回已保存的首次结果。收到 `operation_pending` 或本地控制连接超时后，调用 `get_operation` 查询最终状态。
 
-### 不进入主界面完成新项目配置
+### 使用已有 HTTPS 入口完成新项目配置
 
 MCP 客户端可以按以下顺序完成新项目的接入和发布：
 
-1. 调用 `list_servers` 和 `list_registries`，让用户选择已有的目标服务器与镜像仓库。
+1. 先在桌面端“设置 → 应用入口”配置目标服务器的 HTTPS 入口。然后调用 `list_servers` 和 `list_registries`，让用户选择目标服务器与镜像仓库。
 2. 收集项目来源和构建配置，调用 `create_project`。本地项目使用 `source_kind=local` 并提供 iDeploy 所在机器可访问的绝对路径；Git 项目使用 `source_kind=git` 并提供仓库地址、引用类型和引用值。
 3. 使用返回的项目 ID、服务器 ID、工作负载类型与名称调用 `create_deployment`。
 4. 如有需要，使用 `update_deployment_environment` 配置普通运行变量；数据库密码、令牌等秘密使用 `request_deployment_secret_input` 让用户在本机隐藏输入框中填写。
-5. 使用返回的部署 ID 和仓库 ID 调用 `publish_deployment`。
+5. 用部署 ID、仓库 ID，以及已就绪入口的 `domain`、单级 `path`、应用 `container_port` 调用 `preflight_deployment` 和 `publish_deployment`。
+
+发布路径会以 `IDEPLOY_BASE_PATH`（例如 `/demo/`）传给单容器 Docker 构建参数与运行环境。Compose 可在构建时通过同名变量引用，并须在 Compose 文件中显式传给服务。项目需要据此配置前端资源、路由和 API 路径；详见 [内部应用入口](INTERNAL_INGRESS.md)。
 
 发布前建议调用 `preflight_deployment`。它会检查项目文件、基础镜像 manifest、构建代理、仓库凭据、SSH/Docker、目标架构、容器名称和远程端口占用，并在端口冲突时返回候选端口。`publish_deployment` 也会在开始构建前再次阻止已知的主机端口冲突。修改现有配置时使用 `update_project` 或 `update_deployment`，未提供的字段保持不变；`validate_project` 可重新扫描本地项目构建文件，`clone_deployment` 可继承现有配置并为另一服务器/工作负载创建无发布历史的新部署。
 
@@ -208,6 +211,9 @@ ideploy deployment env set-secret <deployment-id> DATABASE_PASSWORD
 {
   "deployment_id": "deployment-id",
   "registry_id": "registry-id",
+  "domain": "apps.example.com",
+  "path": "demo",
+  "container_port": 8080,
   "version": "v1.2.3",
   "wait": true,
   "timeout_seconds": 1800

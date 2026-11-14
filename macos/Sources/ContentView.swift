@@ -4,9 +4,13 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openWindow) private var openWindow
-    @State private var refreshing = false
+    @State private var refreshTapped = false
+    @State private var refreshFinished = false
+    @State private var refreshFailed = false
+    @State private var refreshSpinStart = Date()
+    private let refreshSpinDuration = 0.9
     private var showingRefresh: Bool {
-        refreshing || (model.section == .domains && model.domainDataLoading)
+        refreshTapped || model.manualRefreshInProgress || (model.section == .domains && model.domainDataLoading)
     }
 
     var body: some View {
@@ -14,6 +18,7 @@ struct ContentView: View {
             sidebar
             VStack(spacing: 0) {
                 workspaceHeader
+                    .zIndex(1)
                 Rectangle().fill(DeployStyle.line).frame(height: 1)
                 Group {
                     if !model.ready {
@@ -49,6 +54,19 @@ struct ContentView: View {
         }
         .onAppear {
             (NSApp.delegate as? NativeAppDelegate)?.showWindow = { openWindow(id: "main") }
+        }
+        .onChange(of: model.section) { section in
+            if section == .overview && model.ready {
+                Task { await model.refresh() }
+            }
+        }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                if model.ready && model.sharedMode == "shared" {
+                    await model.refresh()
+                }
+            }
         }
     }
 
@@ -98,21 +116,27 @@ struct ContentView: View {
             sidebarButton(.settings)
                 .padding(.horizontal, 14)
                 .padding(.top, 10)
-            HStack(spacing: 10) {
-                Circle()
-                    .fill(model.ready ? Color(red: 0.33, green: 0.79, blue: 0.52) : .orange)
-                    .frame(width: 8, height: 8)
-                    .shadow(color: model.ready ? DeployStyle.greenBright.opacity(0.8) : .clear, radius: 5)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(model.ready ? "后台服务已连接" : "正在连接")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Color.white.opacity(0.81))
-                    Text("本机工作空间")
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color.white.opacity(0.38))
+            Button {
+                model.section = .settings
+            } label: {
+                HStack(spacing: 10) {
+                    Circle()
+                        .fill(model.ready && model.sharedSyncError.isEmpty ? Color(red: 0.33, green: 0.79, blue: 0.52) : .orange)
+                        .frame(width: 8, height: 8)
+                        .shadow(color: model.ready ? DeployStyle.greenBright.opacity(0.8) : .clear, radius: 5)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(!model.ready ? "正在连接" : model.sharedSyncError.isEmpty ? "后台服务已连接" : "共享同步需处理")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.white.opacity(0.81))
+                        Text(model.sharedMode == "shared" ? "共享工作空间" : "本机工作空间")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color.white.opacity(0.38))
+                    }
+                    Spacer()
                 }
-                Spacer()
             }
+            .buttonStyle(.plain)
+            .help(model.sharedSyncError.isEmpty ? "打开设置查看工作区状态" : model.sharedSyncError)
             .padding(.horizontal, 24)
             .padding(.top, 21)
             .padding(.bottom, 25)
@@ -165,33 +189,95 @@ struct ContentView: View {
                     .foregroundStyle(DeployStyle.ink)
             }
             Spacer()
-            Button {
-                Task {
-                    refreshing = true
-                    await model.refreshFromUser()
-                    refreshing = false
-                }
-            } label: {
+            Button(action: startRefresh) {
                 HStack(spacing: 8) {
                     if showingRefresh {
-                        ProgressView()
-                            .controlSize(.small)
-                            .frame(width: 14, height: 14)
+                        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+                            Circle()
+                                .trim(from: 0.05, to: 0.78)
+                                .stroke(DeployStyle.green, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                                .rotationEffect(.degrees(
+                                    timeline.date.timeIntervalSince(refreshSpinStart)
+                                        .truncatingRemainder(dividingBy: refreshSpinDuration)
+                                        / refreshSpinDuration * 360
+                                ))
+                                .frame(width: 13, height: 13)
+                                .frame(width: 14, height: 14)
+                        }
                     } else {
-                        Image(systemName: "arrow.clockwise")
+                        Image(systemName: refreshFailed ? "exclamationmark.circle" : (refreshFinished ? "checkmark" : "arrow.clockwise"))
                             .font(.system(size: 13, weight: .semibold))
                             .frame(width: 14, height: 14)
                     }
-                    Text(showingRefresh ? "刷新中…" : "刷新数据")
+                    Text(showingRefresh ? "刷新数据" : (refreshFailed ? "未同步" : (refreshFinished ? "已刷新" : "刷新数据")))
+                        .font(.system(size: 12, weight: .medium))
                 }
+                .foregroundStyle(DeployStyle.green)
+                .frame(width: 108, height: 32)
+                .contentShape(Rectangle())
             }
-            .buttonStyle(DeploySecondaryButtonStyle())
+            .buttonStyle(.plain)
+            .background(Color.white, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(DeployStyle.line, lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
+            .overlay {
+                RefreshMouseTarget(onClick: startRefresh)
+                    .frame(width: 108, height: 32)
+                    .accessibilityHidden(true)
+            }
             .help(model.section == .domains ? "刷新当前主域名的访问项和服务商 DNS 解析记录" : "重新获取项目、服务器、数据库和任务状态")
-            .disabled(model.busy || showingRefresh)
+            .disabled(!model.ready)
         }
         .padding(.horizontal, 30)
         .frame(height: 92)
         .background(Color.white.opacity(0.5))
+    }
+
+    private func startRefresh() {
+        guard model.ready && !showingRefresh else { return }
+        refreshSpinStart = Date()
+        refreshTapped = true
+        refreshFinished = false
+        refreshFailed = false
+        Task {
+            let started = Date()
+            let succeeded = await model.refreshFromUser()
+            let remaining = max(0, refreshSpinDuration + 0.1 - Date().timeIntervalSince(started))
+            if remaining > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+            }
+            refreshTapped = false
+            refreshFinished = succeeded
+            refreshFailed = !succeeded
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            refreshFinished = false
+            refreshFailed = false
+        }
+    }
+}
+
+private struct RefreshMouseTarget: NSViewRepresentable {
+    let onClick: () -> Void
+
+    func makeNSView(context: Context) -> ClickView {
+        ClickView()
+    }
+
+    func updateNSView(_ view: ClickView, context: Context) {
+        view.onClick = onClick
+    }
+
+    final class ClickView: NSView {
+        var onClick: (() -> Void)?
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        override func mouseDown(with event: NSEvent) {
+            onClick?()
+        }
     }
 }
 
@@ -218,6 +304,7 @@ struct PageContainer<Content: View>: View {
                         .blur(radius: 90)
                         .offset(x: 130, y: -230)
                 }
+                .allowsHitTesting(false)
         }
     }
 }
@@ -343,6 +430,7 @@ struct OverviewPage: View {
     private let panelHeight: CGFloat = 290
     var body: some View {
         PageContainer(maxContentWidth: .infinity) {
+            workspaceStatusPanel
             SectionHeading("交付概况", "项目、部署、服务器、数据库和后台任务")
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(minimum: 150), spacing: 12), count: 3), spacing: 12) {
                 InfoTile(title: "项目", value: "\(model.projects.count)", symbol: "folder")
@@ -405,6 +493,45 @@ struct OverviewPage: View {
             JobDetailSheet(job: job)
                 .environmentObject(model)
         }
+    }
+
+    private var workspaceStatusPanel: some View {
+        HStack(spacing: 14) {
+            Image(systemName: model.sharedMode == "shared" ? "arrow.triangle.2.circlepath" : "internaldrive")
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(DeployStyle.green)
+                .frame(width: 38, height: 38)
+                .background(DeployStyle.greenSoft, in: RoundedRectangle(cornerRadius: 9))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(model.sharedMode == "shared" ? "共享数据模式" : "单机模式")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(DeployStyle.ink)
+                Text(workspaceStatusDescription)
+                    .font(.system(size: 11))
+                    .foregroundStyle(model.sharedMode == "shared" && !model.sharedSyncError.isEmpty ? Color.orange : DeployStyle.muted)
+                    .textSelection(.enabled)
+            }
+            Spacer(minLength: 8)
+            Button("共享服务设置") {
+                model.openSharedSettings = true
+                model.section = .settings
+            }
+            .buttonStyle(DeploySecondaryButtonStyle())
+            .accessibilityLabel("打开共享服务设置")
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .deployCard(fill: DeployStyle.overviewPanel)
+    }
+
+    private var workspaceStatusDescription: String {
+        if model.sharedMode != "shared" { return "数据仅保存在这台 Mac 上" }
+        if !model.sharedSyncError.isEmpty { return "同步检查失败：" + model.sharedSyncError }
+        let time = model.sharedLastSyncAt.isEmpty ? "尚未拉取服务端数据" : "上次拉取：" + SharedSyncDateText.localDateTime(model.sharedLastSyncAt)
+        if !model.sharedUnlocked && !model.sharedUpToDate {
+            return "共享凭据暂不可用，请检查共享服务连接 · " + time
+        }
+        return (model.sharedUpToDate ? "配置数据已是最新 · " : model.sharedSyncDetail + " · ") + time
     }
 
     private var toolsPanel: some View {

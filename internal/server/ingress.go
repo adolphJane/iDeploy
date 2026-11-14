@@ -19,6 +19,7 @@ const managedCaddyName = "ideploy-ingress"
 
 type IngressRoute struct {
 	FQDN           string
+	PathPrefix     string
 	HostIP         string
 	HostPort       int
 	UpstreamScheme string
@@ -170,8 +171,12 @@ func containsString(items []string, value string) bool {
 }
 
 func (r *Remote) ProbeIngressBackend(ctx context.Context, connection Connection, hostIP string, hostPort int, fqdn string) error {
+	return r.ProbeIngressBackendPath(ctx, connection, hostIP, hostPort, fqdn, "/")
+}
+
+func (r *Remote) ProbeIngressBackendPath(ctx context.Context, connection Connection, hostIP string, hostPort int, fqdn, path string) error {
 	ip := net.ParseIP(hostIP)
-	if ip == nil || hostPort < 1 || hostPort > 65535 || !validIngressFQDN(fqdn) {
+	if ip == nil || hostPort < 1 || hostPort > 65535 || !validIngressFQDN(fqdn) || (path != "/" && !nginxPathPrefix.MatchString(path)) {
 		return errors.New("后端地址无效")
 	}
 	if ip.IsUnspecified() {
@@ -181,7 +186,7 @@ func (r *Remote) ProbeIngressBackend(ctx context.Context, connection Connection,
 			ip = net.ParseIP("::1")
 		}
 	}
-	url := "http://" + net.JoinHostPort(ip.String(), strconv.Itoa(hostPort)) + "/"
+	url := "http://" + net.JoinHostPort(ip.String(), strconv.Itoa(hostPort)) + path
 	command := "curl --noproxy '*' --connect-timeout 3 --max-time 6 -sS -o /dev/null -w '%{http_code}' -H " + shellQuote("Host: "+fqdn) + " " + shellQuote(url)
 	output, err := r.runTimeout(ctx, connection, command, 12*time.Second)
 	if err != nil {

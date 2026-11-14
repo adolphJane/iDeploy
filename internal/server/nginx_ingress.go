@@ -310,6 +310,37 @@ var nginxCertPath = regexp.MustCompile(`^/[A-Za-z0-9_./-]+$`)
 
 // NginxManagedBlock enables TLS only with an existing certificate/key pair.
 func NginxManagedBlock(routes []IngressRoute, acmeLocation ...string) (string, error) {
+	var paths, hosts []IngressRoute
+	for _, route := range routes {
+		if route.PathPrefix == "" {
+			hosts = append(hosts, route)
+		} else {
+			paths = append(paths, route)
+		}
+	}
+	if len(paths) > 0 {
+		pathHosts := map[string]bool{}
+		for _, path := range paths {
+			pathHosts[path.FQDN] = true
+		}
+		var independent, fallbacks []IngressRoute
+		for _, host := range hosts {
+			if pathHosts[host.FQDN] {
+				fallbacks = append(fallbacks, host)
+			} else {
+				independent = append(independent, host)
+			}
+		}
+		block, err := NginxManagedBlock(independent, acmeLocation...)
+		if err != nil {
+			return "", err
+		}
+		pathBlock, err := nginxPathServers(paths, fallbacks, acmeLocation...)
+		if err != nil {
+			return "", err
+		}
+		return strings.Replace(block, "    "+nginxEnd, pathBlock+"    "+nginxEnd, 1), nil
+	}
 	items := append([]IngressRoute(nil), routes...)
 	sort.Slice(items, func(i, j int) bool { return items[i].FQDN < items[j].FQDN })
 	seen := map[string]bool{}
@@ -361,6 +392,98 @@ func NginxManagedBlock(routes []IngressRoute, acmeLocation ...string) (string, e
 		out.WriteString("            proxy_read_timeout 3600s;\n            proxy_pass " + scheme + "://" + upstream + ";\n        }\n    }\n")
 	}
 	out.WriteString("    " + nginxEnd + "\n")
+	return out.String(), nil
+}
+
+var nginxPathPrefix = regexp.MustCompile(`^/[a-z0-9][a-z0-9_-]{0,62}/$`)
+
+// nginxPathServers keeps the public path unchanged when proxying to each HTTP service.
+func nginxPathServers(routes, fallbacks []IngressRoute, acmeLocation ...string) (string, error) {
+	groups := map[string][]IngressRoute{}
+	fallbackByName := map[string]IngressRoute{}
+	for _, fallback := range fallbacks {
+		if _, exists := fallbackByName[fallback.FQDN]; exists {
+			return "", fmt.Errorf("%s 的根路径入口重复", fallback.FQDN)
+		}
+		fallbackByName[fallback.FQDN] = fallback
+	}
+	for _, route := range routes {
+		if !validIngressFQDN(route.FQDN) || !nginxPathPrefix.MatchString(route.PathPrefix) || route.HostPort < 1 || route.HostPort > 65535 || net.ParseIP(route.HostIP) == nil {
+			return "", errors.New("路径路由的域名、路径或后端地址无效")
+		}
+		if route.UpstreamScheme != "" && route.UpstreamScheme != "http" && route.UpstreamScheme != "https" {
+			return "", errors.New("路径路由的后端协议无效")
+		}
+		for _, existing := range groups[route.FQDN] {
+			if existing.PathPrefix == route.PathPrefix {
+				return "", fmt.Errorf("%s%s 路径重复", route.FQDN, route.PathPrefix)
+			}
+			if existing.Certificate != route.Certificate || existing.CertificateKey != route.CertificateKey {
+				return "", fmt.Errorf("%s 的路径路由必须共用同一证书", route.FQDN)
+			}
+		}
+		groups[route.FQDN] = append(groups[route.FQDN], route)
+	}
+	hostnames := make([]string, 0, len(groups))
+	for name := range groups {
+		hostnames = append(hostnames, name)
+	}
+	sort.Strings(hostnames)
+	var out strings.Builder
+	for _, name := range hostnames {
+		items := groups[name]
+		sort.Slice(items, func(i, j int) bool { return items[i].PathPrefix < items[j].PathPrefix })
+		first := items[0]
+		fallback, hasFallback := fallbackByName[name]
+		if hasFallback && (fallback.Certificate != first.Certificate || fallback.CertificateKey != first.CertificateKey || fallback.HostPort < 1 || fallback.HostPort > 65535 || net.ParseIP(fallback.HostIP) == nil) {
+			return "", fmt.Errorf("%s 的根路径入口与项目路径配置不一致", name)
+		}
+		tls := first.Certificate != "" || first.CertificateKey != ""
+		if tls && (!nginxCertPath.MatchString(first.Certificate) || !nginxCertPath.MatchString(first.CertificateKey)) {
+			return "", errors.New("HTTPS 需要有效的容器内证书和私钥路径")
+		}
+		out.WriteString("    server {\n        listen 80;\n        server_name " + name + ";\n")
+		if tls {
+			out.WriteString("        add_header X-iDeploy-Route " + IngressRouteMarker(name) + " always;\n")
+			if len(acmeLocation) > 0 && acmeLocation[0] != "" {
+				out.WriteString("        " + strings.TrimSpace(acmeLocation[0]) + "\n")
+			}
+			out.WriteString("        location / { return 301 https://$host$request_uri; }\n    }\n")
+			out.WriteString("    server {\n        listen 443 ssl;\n        server_name " + name + ";\n")
+			out.WriteString("        ssl_certificate " + first.Certificate + ";\n        ssl_certificate_key " + first.CertificateKey + ";\n")
+		}
+		out.WriteString("        add_header X-iDeploy-Route " + IngressRouteMarker(name) + " always;\n")
+		for _, route := range items {
+			ip := net.ParseIP(route.HostIP)
+			if ip.IsUnspecified() {
+				if ip.To4() != nil {
+					ip = net.ParseIP("127.0.0.1")
+				} else {
+					ip = net.ParseIP("::1")
+				}
+			}
+			scheme := route.UpstreamScheme
+			if scheme == "" {
+				scheme = "http"
+			}
+			upstream := net.JoinHostPort(ip.String(), strconv.Itoa(route.HostPort))
+			out.WriteString("        location = " + strings.TrimSuffix(route.PathPrefix, "/") + " { return 308 " + route.PathPrefix + "$is_args$args; }\n")
+			out.WriteString("        location ^~ " + route.PathPrefix + " {\n")
+			out.WriteString("            add_header X-iDeploy-Route " + IngressRouteMarker(name) + " always;\n")
+			out.WriteString("            add_header X-iDeploy-Path " + IngressRouteMarker(name+route.PathPrefix) + " always;\n")
+			out.WriteString("            proxy_set_header Host $host;\n            proxy_set_header X-Real-IP $remote_addr;\n")
+			out.WriteString("            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n            proxy_set_header X-Forwarded-Proto $scheme;\n")
+			out.WriteString("            proxy_set_header X-Forwarded-Prefix " + strings.TrimSuffix(route.PathPrefix, "/") + ";\n")
+			out.WriteString("            proxy_set_header Upgrade $http_upgrade;\n            proxy_set_header Connection \"upgrade\";\n")
+			out.WriteString("            proxy_read_timeout 3600s;\n            proxy_pass " + scheme + "://" + upstream + ";\n        }\n")
+		}
+		if hasFallback {
+			upstream := net.JoinHostPort(fallback.HostIP, strconv.Itoa(fallback.HostPort))
+			out.WriteString("        location / {\n            proxy_set_header Host $host;\n            proxy_set_header X-Forwarded-Proto $scheme;\n            proxy_pass http://" + upstream + ";\n        }\n    }\n")
+		} else {
+			out.WriteString("        location / { return 404; }\n    }\n")
+		}
+	}
 	return out.String(), nil
 }
 
@@ -568,9 +691,35 @@ func (r *Remote) ApplyExistingNginx(ctx context.Context, connection Connection, 
 				return "", fmt.Errorf("Nginx HTTPS 校验失败，已尝试恢复备份（恢复结果：%v）: %w", restoreErr, tlsErr)
 			}
 		}
+		if route.PathPrefix != "" {
+			if pathErr := r.ProbeNginxPathRoute(ctx, connection, route); pathErr != nil {
+				restoreErr := restore()
+				return "", fmt.Errorf("Nginx 路径校验失败，已尝试恢复备份（恢复结果：%v）: %w", restoreErr, pathErr)
+			}
+		}
 	}
 	hash := sha256.Sum256([]byte(config))
 	return hex.EncodeToString(hash[:]), nil
+}
+
+// ProbeNginxPathRoute verifies that the exact path location, not just the host, responded.
+func (r *Remote) ProbeNginxPathRoute(ctx context.Context, connection Connection, route IngressRoute) error {
+	if !validIngressFQDN(route.FQDN) || !nginxPathPrefix.MatchString(route.PathPrefix) {
+		return errors.New("路径路由无效")
+	}
+	scheme, port := "http", "80"
+	if route.Certificate != "" {
+		scheme, port = "https", "443"
+	}
+	command := "curl --noproxy '*' --connect-timeout 3 --max-time 8 -sS -o /dev/null -D - --resolve " + shellQuote(route.FQDN+":"+port+":127.0.0.1") + " " + shellQuote(scheme+"://"+route.FQDN+route.PathPrefix)
+	output, err := r.runTimeout(ctx, connection, command, 12*time.Second)
+	if err != nil {
+		return fmt.Errorf("Nginx 路径无法访问: %w", err)
+	}
+	if !strings.Contains(strings.ToLower(output), "x-ideploy-path: "+IngressRouteMarker(route.FQDN+route.PathPrefix)) {
+		return errors.New("路径请求未命中预期的 iDeploy 路由")
+	}
+	return nil
 }
 
 func (r *Remote) ProbeNginxHTTPSRoute(ctx context.Context, connection Connection, fqdn string) error {

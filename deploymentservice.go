@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"ideploy/internal/deployment"
+	"ideploy/internal/domain"
 	"ideploy/internal/job"
 	"ideploy/internal/project"
 	"ideploy/internal/registry"
@@ -26,6 +27,9 @@ func (s *SystemService) GetJob(id string) (JobView, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	value, err := store.Get(ctx, id)
+	if errors.Is(err, job.ErrNotFound) {
+		return s.sharedJobSummary(ctx, id)
+	}
 	return toJobView(value), err
 }
 
@@ -122,6 +126,9 @@ func (s *SystemService) DetectDeploymentVersion(deploymentID string) (Deployment
 }
 
 func (s *SystemService) PublishDeployment(input DeploymentReleaseInput) (JobView, error) {
+	if err := s.ensureSharedPublicationReady(); err != nil {
+		return JobView{}, err
+	}
 	return s.publishDeployment(input, false)
 }
 
@@ -147,7 +154,7 @@ func (s *SystemService) publishDeployment(input DeploymentReleaseInput, retryFai
 	if !releaseVersionPattern.MatchString(input.Version) {
 		return JobView{}, errors.New("版本只能包含字母、数字、点、短横线和下划线")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 125*time.Second)
 	defer cancel()
 	target, err := store.Get(ctx, input.DeploymentID)
 	if err != nil {
@@ -155,6 +162,22 @@ func (s *SystemService) publishDeployment(input DeploymentReleaseInput, retryFai
 	}
 	if target.WorkloadName == "" {
 		return JobView{}, errors.New("请先完成部署目标配置")
+	}
+	paths, err := s.domainStore()
+	if err != nil {
+		return JobView{}, err
+	}
+	intent := domain.PublishPath{DeploymentID: target.ID, FQDN: strings.ToLower(strings.TrimSpace(input.FQDN)), PathPrefix: input.PathPrefix, ServiceName: strings.TrimSpace(input.ServiceName), ContainerPort: input.ContainerPort}
+	intent.PathPrefix, err = domain.NormalizeSharedPath(intent.PathPrefix)
+	if err != nil {
+		return JobView{}, err
+	}
+	ingress, err := paths.GetInternalIngress(ctx, intent.FQDN)
+	if err != nil || ingress.Status != "ready" || ingress.ServerID != target.ServerID {
+		return JobView{}, errors.New("请先在设置中完成此服务器的内部 HTTPS 入口配置")
+	}
+	if intent.ContainerPort < 1 || intent.ContainerPort > 65535 {
+		return JobView{}, errors.New("请选择有效的应用容器端口")
 	}
 	history, err := store.VersionHistory(ctx, target.ID)
 	if err != nil {
@@ -182,6 +205,13 @@ func (s *SystemService) publishDeployment(input DeploymentReleaseInput, retryFai
 	probeCancel()
 	if err != nil {
 		return JobView{}, err
+	}
+	observedIngress, err := s.inspectInternalIngress(ctx, intent.FQDN)
+	if err != nil {
+		return JobView{}, err
+	}
+	if observedIngress.Status != "ready" {
+		return JobView{}, fmt.Errorf("内部 HTTPS 入口未通过实际检查：%s", observedIngress.Detail)
 	}
 	if err := s.validateDeploymentPortAvailability(ctx, target, host); err != nil {
 		return JobView{}, err
@@ -212,10 +242,17 @@ func (s *SystemService) publishDeployment(input DeploymentReleaseInput, retryFai
 			return JobView{}, err
 		}
 	}
+	if err := paths.ReservePublishPath(ctx, intent); err != nil {
+		return JobView{}, err
+	}
 	release, err := store.CreateRelease(ctx, deployment.ReleaseInput{
 		DeploymentID: target.ID, RegistryID: input.RegistryID, Action: "deploy", Version: input.Version, AllowRetry: retryFailed,
 	})
 	if err != nil {
+		return JobView{}, err
+	}
+	if err := paths.SaveReleasePathIntent(ctx, release.ID, intent); err != nil {
+		_ = store.UpdateRelease(ctx, release.ID, deployment.ReleaseFailed, err.Error(), "", "", "")
 		return JobView{}, err
 	}
 	payload, err := json.Marshal(struct {
@@ -284,6 +321,9 @@ func (s *SystemService) validateDeploymentPortAvailability(ctx context.Context, 
 }
 
 func (s *SystemService) RetryRelease(releaseID string) (JobView, error) {
+	if err := s.ensureSharedPublicationReady(); err != nil {
+		return JobView{}, err
+	}
 	store, err := s.deploymentStore()
 	if err != nil {
 		return JobView{}, err
@@ -307,8 +347,17 @@ func (s *SystemService) RetryRelease(releaseID string) (JobView, error) {
 		return JobView{}, errors.New("失败记录缺少镜像仓库，无法重试")
 	}
 	if source.ImageRef == "" && source.Manifest == "" {
+		paths, err := s.domainStore()
+		if err != nil {
+			return JobView{}, err
+		}
+		intent, err := paths.GetReleasePathIntent(ctx, source.ID)
+		if err != nil {
+			return JobView{}, errors.New("失败发布记录缺少应用路径，请在发布页面重新创建发布")
+		}
 		return s.publishDeployment(DeploymentReleaseInput{
 			DeploymentID: source.DeploymentID, RegistryID: source.RegistryID, Version: source.Version,
+			FQDN: intent.FQDN, PathPrefix: intent.PathPrefix, ServiceName: intent.ServiceName, ContainerPort: intent.ContainerPort,
 		}, true)
 	}
 	if err := validateRollbackArtifact(source.ImageRef, source.Manifest); err != nil {
@@ -335,11 +384,30 @@ func (s *SystemService) RetryRelease(releaseID string) (JobView, error) {
 	if err := s.validateDeploymentPortAvailability(ctx, target, host); err != nil {
 		return JobView{}, err
 	}
+	paths, err := s.domainStore()
+	if err != nil {
+		return JobView{}, err
+	}
+	intent, err := paths.GetReleasePathIntent(ctx, source.ID)
+	if err != nil {
+		return JobView{}, errors.New("失败发布记录缺少应用路径，请重新创建发布")
+	}
+	ingress, err := paths.GetInternalIngress(ctx, intent.FQDN)
+	if err != nil || ingress.Status != "ready" || ingress.ServerID != target.ServerID {
+		return JobView{}, errors.New("请先在设置中恢复此服务器的内部 HTTPS 入口")
+	}
+	if err := paths.ReservePublishPath(ctx, intent); err != nil {
+		return JobView{}, err
+	}
 	release, err := store.CreateRelease(ctx, deployment.ReleaseInput{
 		DeploymentID: source.DeploymentID, RegistryID: source.RegistryID, Action: "deploy", Version: source.Version,
 		ImageRef: source.ImageRef, Manifest: source.Manifest, RollbackToID: source.ID, AllowResume: true,
 	})
 	if err != nil {
+		return JobView{}, err
+	}
+	if err := paths.SaveReleasePathIntent(ctx, release.ID, intent); err != nil {
+		_ = store.UpdateRelease(ctx, release.ID, deployment.ReleaseFailed, err.Error(), "", "", "")
 		return JobView{}, err
 	}
 	payload, err := json.Marshal(struct {
@@ -380,6 +448,9 @@ func (s *SystemService) verifyDeploymentServer(ctx context.Context, connection s
 }
 
 func (s *SystemService) RollbackDeployment(deploymentID, sourceReleaseID string) (JobView, error) {
+	if err := s.ensureSharedPublicationReady(); err != nil {
+		return JobView{}, err
+	}
 	store, err := s.deploymentStore()
 	if err != nil {
 		return JobView{}, err
@@ -556,6 +627,13 @@ func (s *SystemService) recreateDeploymentContainer(ctx context.Context, store *
 		labels["com.ideploy.pinned-image"] = release.ImageRef
 		labels["com.ideploy.release-id"] = release.ID
 		labels["com.ideploy.version"] = release.Version
+		basePath, pathErr := s.releaseBasePath(ctx, release)
+		if pathErr != nil {
+			return pathErr
+		}
+		if basePath != "" {
+			environment["IDEPLOY_BASE_PATH"] = basePath
+		}
 	}
 	reporter.Progress(20, fmt.Sprintf("正在使用原镜像重建容器并注入 %d 个环境变量", len(environment)))
 	replacement, err := remote.DeployContainerWithAgent(ctx, host, target.ServerID, jobID, target.WorkloadName, image, target.RestartPolicy, target.ContainerPorts, labels, environment)

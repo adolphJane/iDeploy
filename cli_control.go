@@ -35,6 +35,10 @@ type cliRequest struct {
 	BuildProxy            *BuildProxySettingsInput          `json:"buildProxy,omitempty"`
 	RegistryID            string                            `json:"registryId,omitempty"`
 	Version               string                            `json:"version,omitempty"`
+	FQDN                  string                            `json:"fqdn,omitempty"`
+	PathPrefix            string                            `json:"pathPrefix,omitempty"`
+	ServiceName           string                            `json:"serviceName,omitempty"`
+	ContainerPort         int                               `json:"containerPort,omitempty"`
 	ReleaseID             string                            `json:"releaseId,omitempty"`
 	DeploymentID          string                            `json:"deploymentId,omitempty"`
 	ContainerID           string                            `json:"containerId,omitempty"`
@@ -196,6 +200,24 @@ func callCLIControl(ctx context.Context, path string, request cliRequest) (cliRe
 func executeCLIRequest(ctx context.Context, service *SystemService, request cliRequest) cliResponse {
 	var value any
 	var err error
+	sharedMutation := map[string]string{
+		"project.create": "CreateProject", "project.update": "PatchProject", "project.delete": "DeleteProjectConfiguration",
+		"deployment.create": "CreateDeployment", "deployment.update": "PatchDeployment",
+		"deployment.clone": "CloneDeployment", "deployment.delete": "DeleteDeploymentConfiguration",
+		"deployment.environment.update":        "UpdateDeploymentEnvironment",
+		"deployment.environment.secret.prompt": "PromptDeploymentSecret",
+	}[request.Command]
+	sharedOperation := map[string]bool{
+		"server.agent.install": true, "server.agent.update": true, "server.agent.uninstall": true,
+		"deployment.start": true, "deployment.stop": true, "deployment.restart": true,
+	}[request.Command]
+	if service != nil && (sharedMutation != "" || sharedOperation) {
+		service.sharedWriteMu.Lock()
+		defer service.sharedWriteMu.Unlock()
+		if err := service.prepareSharedWrite(sharedMutation, nil); err != nil {
+			return errorCLIResponse("operation_failed", err.Error())
+		}
+	}
 	switch request.Command {
 	case "native.call":
 		value, err = executeNativeCall(service, request.NativeMethod, request.NativeArgs)
@@ -242,6 +264,8 @@ func executeCLIRequest(ctx context.Context, service *SystemService, request cliR
 		value, err = service.UninstallServerAgent(request.ID)
 	case "domain.list":
 		value, err = service.ListDomains()
+	case "internal.ingress.list":
+		value, err = service.ListInternalIngresses()
 	case "domain.host.list":
 		value, err = service.ListDomainHosts(request.ID)
 	case "domain.dns-record.list":
@@ -282,7 +306,7 @@ func executeCLIRequest(ctx context.Context, service *SystemService, request cliR
 	case "deployment.get":
 		value, err = findDeployment(service, request.ID)
 	case "deployment.preflight":
-		value, err = service.PreflightDeployment(DeploymentPreflightInput{DeploymentID: request.ID, RegistryID: request.RegistryID, RequestID: request.RequestID})
+		value, err = service.PreflightDeployment(DeploymentPreflightInput{DeploymentID: request.ID, RegistryID: request.RegistryID, RequestID: request.RequestID, FQDN: request.FQDN, PathPrefix: request.PathPrefix, ServiceName: request.ServiceName, ContainerPort: request.ContainerPort})
 	case "deployment.preflight.progress":
 		value, err = service.GetPreflightProgress(request.ID)
 	case "deployment.runtime":
@@ -298,7 +322,7 @@ func executeCLIRequest(ctx context.Context, service *SystemService, request cliR
 	case "deployment.environment.secret.prompt":
 		value, err = service.PromptDeploymentSecret(DeploymentSecretPromptInput{DeploymentID: request.ID, Name: request.DeploymentSecretName})
 	case "deployment.publish":
-		value, err = service.PublishDeployment(DeploymentReleaseInput{DeploymentID: request.ID, RegistryID: request.RegistryID, Version: request.Version})
+		value, err = service.PublishDeployment(DeploymentReleaseInput{DeploymentID: request.ID, RegistryID: request.RegistryID, Version: request.Version, FQDN: request.FQDN, PathPrefix: request.PathPrefix, ServiceName: request.ServiceName, ContainerPort: request.ContainerPort})
 		value, err = waitForCLIJobIfNeeded(ctx, service, value, err, request.Wait)
 	case "deployment.rollback":
 		value, err = service.RollbackDeployment(request.ID, request.ReleaseID)
@@ -327,6 +351,9 @@ func executeCLIRequest(ctx context.Context, service *SystemService, request cliR
 		}
 	default:
 		err = &cliCommandError{Code: "unknown_command", Message: "unknown command"}
+	}
+	if err == nil && sharedMutation != "" {
+		err = service.completeSharedWrite()
 	}
 	if err != nil {
 		response := cliResponse{}

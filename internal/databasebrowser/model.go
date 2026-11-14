@@ -92,8 +92,12 @@ func (input NewConnection) Validate() (NewConnection, error) {
 	}
 	switch input.SSLMode {
 	case "require", "disable":
+	case "skip-verify":
+		if input.Driver != DriverMySQL {
+			return input, errors.New("仅 MySQL 支持跳过 TLS 证书验证")
+		}
 	default:
-		return input, errors.New("TLS 模式仅支持 require 或 disable")
+		return input, errors.New("TLS 模式仅支持 require、skip-verify 或 disable")
 	}
 	return input, nil
 }

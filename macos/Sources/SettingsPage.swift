@@ -6,6 +6,8 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     case terminal = "终端集成"
     case build = "构建与智能"
     case data = "本机数据"
+    case shared = "共享服务"
+    case ingress = "应用入口"
 
     var id: String { rawValue }
     var symbol: String {
@@ -14,6 +16,8 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .terminal: "terminal"
         case .build: "hammer"
         case .data: "internaldrive"
+        case .shared: "server.rack"
+        case .ingress: "network"
         }
     }
     var subtitle: String {
@@ -22,6 +26,8 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .terminal: "命令行与 MCP"
         case .build: "构建代理与 AI"
         case .data: "文件、缓存和清理"
+        case .shared: "远程部署与 MySQL"
+        case .ingress: "域名、HTTPS 与项目路径"
         }
     }
 }
@@ -47,6 +53,27 @@ struct SettingsPage: View {
     @State private var savingProxy = false
     @State private var savingKey = false
     @State private var confirmingServerClear = false
+    @AppStorage("sharedServerTargetID") private var sharedServerID = ""
+    @AppStorage("sharedServerDatabaseID") private var sharedDatabaseID = ""
+    @AppStorage("sharedServerDatabaseName") private var sharedDatabaseName = ""
+    @AppStorage("sharedServerSkipTLSVerify") private var sharedSkipTLSVerify = false
+    @State private var sharedSchemas: [J] = []
+    @State private var sharedPlan = J(nil)
+    @State private var sharedStatus = J(nil)
+    @State private var sharedJob = J(nil)
+    @State private var sharedMessage = ""
+    @State private var sharedBusy = false
+    @State private var workspaceStatus = J(nil)
+    @State private var migrationPreview = J(nil)
+    @State private var pairingCode = ""
+    @State private var joinCode = ""
+    @State private var deviceName = Host.current().localizedName ?? "Mac"
+    @State private var sharedConflicts: [J] = []
+    @State private var copiedConflictID = ""
+    @State private var workspaceAction = ""
+    @State private var workspaceFeedback = ""
+    @State private var workspaceFailed = false
+    @State private var sharedDevices: [J] = []
 
     var body: some View {
         HStack(spacing: 0) {
@@ -56,7 +83,7 @@ struct SettingsPage: View {
                         Text("设置")
                             .font(.system(size: 16, weight: .bold))
                             .foregroundStyle(DeployStyle.ink)
-                        Text("4 个分类")
+                        Text("6 个分类")
                             .font(.caption)
                             .foregroundStyle(DeployStyle.muted)
                     }
@@ -111,11 +138,17 @@ struct SettingsPage: View {
                 case .terminal: terminalSettings
                 case .build: buildSettings
                 case .data: dataSettings
+                case .shared: sharedSettings
+                case .ingress: InternalIngressSettings()
                 }
             }
             .id(section)
         }
         .environment(\.colorScheme, .light)
+        .onAppear { focusSharedSettingsIfRequested() }
+        .onChange(of: model.openSharedSettings) { requested in
+            if requested { focusSharedSettingsIfRequested() }
+        }
         .task { await load() }
         .confirmationDialog("清除全部服务器数据？", isPresented: $confirmingServerClear) {
             Button("确认清除", role: .destructive) {
@@ -304,6 +337,411 @@ struct SettingsPage: View {
         }
     }
 
+    private var sharedSettings: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            card("共享服务远程部署", "将 iDeploy Server 作为 Docker 容器安装到已连接服务器", symbol: "server.rack") {
+                Picker("目标服务器", selection: $sharedServerID) {
+                    Text("选择服务器").tag("")
+                    ForEach(model.servers, id: \.id) { item in Text(item["name"].string).tag(item.id) }
+                }
+                .onChange(of: sharedServerID) { _ in
+                    sharedPlan = J(nil); sharedStatus = J(nil)
+                    if !sharedServerID.isEmpty { inspectSharedServer() }
+                }
+                Picker("远程 MySQL", selection: $sharedDatabaseID) {
+                    Text("选择 MySQL 连接").tag("")
+                    ForEach(model.databases.filter { $0["driver"].string == "mysql" }, id: \.id) { item in
+                        Text(item["name"].string + " · " + item["host"].string).tag(item.id)
+                    }
+                }
+                .onChange(of: sharedDatabaseID) { _ in
+                    sharedPlan = J(nil)
+                    sharedSchemas = []
+                    sharedDatabaseName = model.databases.first(where: { $0.id == sharedDatabaseID })?["databaseName"].string ?? ""
+                    loadSharedSchemas()
+                }
+                HStack {
+                    TextField("共享服务数据库名，例如 ideploy_shared", text: $sharedDatabaseName)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: sharedDatabaseName) { _ in sharedPlan = J(nil) }
+                    Button("读取数据库列表") { loadSharedSchemas() }
+                        .buttonStyle(DeploySecondaryButtonStyle())
+                        .disabled(sharedDatabaseID.isEmpty || sharedBusy)
+                }
+                if !sharedSchemas.isEmpty {
+                    Menu("从已有数据库选择") {
+                        ForEach(sharedSchemas.indices, id: \.self) { index in
+                            let item = sharedSchemas[index]
+                            Button(item["name"].string) { sharedDatabaseName = item["name"].string }
+                        }
+                    }
+                    .buttonStyle(DeploySecondaryButtonStyle())
+                }
+                Text("数据库名可从列表选择，也可手动填写；尚未创建时可先到“数据库 → 浏览数据”创建。账号需有建表和读写权限，并允许目标服务器通过 TLS 连接。服务仅监听服务器本机 127.0.0.1:8765。")
+                    .font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
+                Toggle("跳过 MySQL 服务器证书验证", isOn: $sharedSkipTLSVerify)
+                    .onChange(of: sharedSkipTLSVerify) { _ in sharedPlan = J(nil) }
+                if sharedSkipTLSVerify {
+                    Text("仍使用 TLS 加密，但无法确认连接的数据库服务器身份。适用于当前自动生成证书无法通过校验的 MySQL；建议后续更换标准证书。")
+                        .font(.system(size: 11)).foregroundStyle(.orange)
+                }
+                HStack(spacing: 10) {
+                    Button("检查服务器状态") { inspectSharedServer() }
+                        .buttonStyle(DeploySecondaryButtonStyle()).disabled(sharedServerID.isEmpty || sharedBusy)
+                    Button("发布前预检") { planSharedServer() }
+                        .buttonStyle(DeploySecondaryButtonStyle()).disabled(sharedServerID.isEmpty || sharedDatabaseID.isEmpty || sharedDatabaseName.isEmpty || sharedBusy)
+                    if sharedBusy { ProgressView().controlSize(.small) }
+                }
+                if !sharedStatus.isNull {
+                    if sharedStatus["installed"].bool {
+                        HStack(spacing: 8) {
+                            AppStatusBadge(title: sharedStatus["updateAvailable"].bool ? "有可用更新" : "已是最新版本", tone: sharedStatus["updateAvailable"].bool ? .warning : .success)
+                            Text("当前：\(sharedStatus["imageTag"].string.replacingOccurrences(of: "ideploy/shared-server:", with: "")) · 本机：\(sharedStatus["latestImageTag"].string.replacingOccurrences(of: "ideploy/shared-server:", with: ""))")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(DeployStyle.muted)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    Text(sharedStatus["detail"].string).font(.system(size: 11)).foregroundStyle(DeployStyle.muted).textSelection(.enabled)
+                }
+                if !sharedPlan.isNull {
+                    Text(sharedPlan["detail"].string).font(.system(size: 11)).foregroundStyle(DeployStyle.muted).textSelection(.enabled)
+                    if sharedPlan["canDeploy"].bool {
+                        Button(sharedPlan["repair"].bool ? "修复并重新部署" : sharedPlan["upgrade"].bool ? "更新共享服务" : "部署共享服务") { deploySharedServer() }
+                            .buttonStyle(DeployPrimaryButtonStyle()).disabled(sharedBusy)
+                    }
+                }
+                if !sharedJob.isNull {
+                    ProgressView(value: Double(sharedJob["progress"].int), total: 100)
+                    Text(sharedJob["message"].string).font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
+                }
+                if !sharedMessage.isEmpty { Text(sharedMessage).font(.system(size: 11)).foregroundStyle(.orange).textSelection(.enabled) }
+            }
+            card("共享工作区", "首次迁移、设备配对与持续同步", symbol: "arrow.triangle.2.circlepath") {
+                HStack(spacing: 10) {
+                    Text(workspaceStatus["mode"].string == "shared" ? "已加入共享工作区" : "本机工作区")
+                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(DeployStyle.ink)
+                    Spacer()
+                    Button(workspaceAction == "status" ? "刷新中…" : "刷新状态") { loadWorkspaceStatus() }
+                        .buttonStyle(SharedWorkspaceButtonStyle()).disabled(!workspaceAction.isEmpty)
+                }
+                if !workspaceAction.isEmpty { ProgressView().controlSize(.small).accessibilityLabel("共享工作区正在执行操作") }
+                if !workspaceFeedback.isEmpty {
+                    Text(workspaceFeedback).font(.system(size: 11))
+                        .foregroundStyle(workspaceFailed ? Color.orange : DeployStyle.green)
+                        .textSelection(.enabled)
+                }
+                if workspaceStatus["mode"].string == "shared" {
+                    Text("已同步游标：\(workspaceStatus["cursor"].int) · 上次拉取：\(SharedSyncDateText.localDateTime(workspaceStatus["lastSyncAt"].string))")
+                        .font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
+                    if !workspaceStatus["unlocked"].bool {
+                        Text("共享凭据暂不可用，请检查共享服务连接后刷新状态。")
+                            .font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
+                    }
+                    HStack(spacing: 10) {
+                        Button(workspaceAction == "sync" ? "同步中…" : "立即同步") { syncWorkspace() }
+                            .buttonStyle(SharedWorkspaceButtonStyle()).disabled(!workspaceAction.isEmpty || !workspaceStatus["unlocked"].bool)
+                        Button(workspaceAction == "pair" ? "生成中…" : "生成设备配对码") { createPairingCode() }
+                            .buttonStyle(SharedWorkspaceButtonStyle()).disabled(!workspaceAction.isEmpty || !workspaceStatus["unlocked"].bool)
+                    }
+                    if !pairingCode.isEmpty {
+                        Text("10 分钟内在新设备输入配对码：\(pairingCode)")
+                            .font(.system(size: 11)).textSelection(.enabled)
+                    }
+                    HStack {
+                        Text("已接入设备").font(.system(size: 12, weight: .semibold)).foregroundStyle(DeployStyle.ink)
+                        Spacer()
+                        Button(workspaceAction == "devices" ? "读取中…" : "刷新设备") { loadSharedDevices() }
+                            .buttonStyle(SharedWorkspaceButtonStyle()).disabled(!workspaceAction.isEmpty || !workspaceStatus["unlocked"].bool)
+                    }
+                    ForEach(sharedDevices, id: \.id) { device in
+                        HStack {
+                            Text(device["name"].string + (device["id"].string == workspaceStatus["deviceId"].string ? "（本机）" : ""))
+                                .font(.system(size: 11)).foregroundStyle(DeployStyle.ink)
+                            Spacer()
+                            if device["revoked"].bool {
+                                Text("已撤销").font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
+                            } else if device["id"].string != workspaceStatus["deviceId"].string {
+                                Button("撤销") { revokeSharedDevice(device["id"].string) }
+                                    .buttonStyle(SharedWorkspaceButtonStyle()).disabled(!workspaceAction.isEmpty || !workspaceStatus["unlocked"].bool)
+                            }
+                        }
+                    }
+                    if workspaceStatus["pending"].int > 0 || workspaceStatus["conflicts"].int > 0 {
+                        Text("待同步 \(workspaceStatus["pending"].int) 项 · 冲突 \(workspaceStatus["conflicts"].int) 项")
+                            .font(.system(size: 11)).foregroundStyle(.orange)
+                        Button(workspaceAction == "conflicts" ? "读取中…" : "查看冲突") { loadSharedConflicts() }
+                            .buttonStyle(SharedWorkspaceButtonStyle()).disabled(!workspaceAction.isEmpty || !workspaceStatus["unlocked"].bool)
+                    }
+                    ForEach(sharedConflicts, id: \.id) { conflict in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(conflict["error"].string).font(.system(size: 11)).foregroundStyle(.orange)
+                            ForEach(conflict["items"].array, id: \.id) { item in
+                                Text(item["kind"].string + " · " + item["id"].string)
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text("本机：" + sharedJSON(item["local"])).font(.system(size: 10)).textSelection(.enabled)
+                                Text("远端：" + sharedJSON(item["remote"])).font(.system(size: 10)).textSelection(.enabled)
+                            }
+                            HStack {
+                                Button(copiedConflictID == conflict.id ? "已复制" : "复制冲突详情") { copySharedConflict(conflict) }
+                                Button("保留远端") { resolveSharedConflict(conflict.id, choice: "remote") }
+                                    .disabled(!workspaceAction.isEmpty || !workspaceStatus["unlocked"].bool)
+                                Button("保留本机") { resolveSharedConflict(conflict.id, choice: "local") }
+                                    .disabled(!workspaceAction.isEmpty || !workspaceStatus["unlocked"].bool)
+                            }
+                            .buttonStyle(SharedWorkspaceButtonStyle())
+                        }
+                        .padding(12)
+                        .deployCard(fill: DeployStyle.overviewPanel)
+                    }
+                } else {
+                    Text("首次迁移会同步本机配置；SSH 私钥文件和本地源码目录不会上传。已有共享数据的设备请使用配对码加入。")
+                        .font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
+                    HStack(spacing: 10) {
+                        Button("预览本机迁移") { previewMigration() }
+                            .buttonStyle(SharedWorkspaceButtonStyle()).disabled(sharedServerID.isEmpty || !workspaceAction.isEmpty)
+                        if !migrationPreview.isNull {
+                        Button(workspaceStatus["mode"].string == "preparing" ? "继续上次迁移" : "迁移到共享服务") { migrateWorkspace() }
+                                .buttonStyle(SharedWorkspaceButtonStyle(primary: true))
+                                .disabled(!workspaceAction.isEmpty || !migrationPreview["blockers"].array.isEmpty)
+                        }
+                    }
+                    if !migrationPreview.isNull {
+                        Text("将迁移 \(migrationPreview["totalRecords"].int) 条配置及 \(migrationPreview["secretCount"].int) 项加密凭据")
+                            .font(.system(size: 11)).foregroundStyle(DeployStyle.ink)
+                        ForEach(migrationPreview["localPaths"].array.indices, id: \.self) { index in
+                            Text(migrationPreview["localPaths"][index].string).font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
+                        }
+                        ForEach(migrationPreview["blockers"].array.indices, id: \.self) { index in
+                            Text(migrationPreview["blockers"][index].string).font(.system(size: 11)).foregroundStyle(.orange)
+                        }
+                    }
+                    divider
+                    Text("从其他设备加入").font(.system(size: 12, weight: .semibold)).foregroundStyle(DeployStyle.ink)
+                    TextField("一次性配对码", text: $joinCode).textFieldStyle(.roundedBorder)
+                    TextField("此设备名称", text: $deviceName).textFieldStyle(.roundedBorder)
+                    Button("加入共享工作区") { joinWorkspace() }
+                        .buttonStyle(SharedWorkspaceButtonStyle())
+                        .disabled(!workspaceAction.isEmpty || sharedServerID.isEmpty || joinCode.isEmpty)
+                }
+            }
+        }
+        .onAppear {
+            if sharedDatabaseName.isEmpty {
+                sharedDatabaseName = model.databases.first(where: { $0.id == sharedDatabaseID })?["databaseName"].string ?? ""
+            }
+            if sharedSchemas.isEmpty && !sharedDatabaseID.isEmpty { loadSharedSchemas() }
+            if !sharedServerID.isEmpty { inspectSharedServer() }
+            loadWorkspaceStatus()
+        }
+    }
+
+    private func focusSharedSettingsIfRequested() {
+        if model.openSharedSettings || (model.sharedMode == "shared" && !model.sharedUnlocked) {
+            section = .shared
+            model.openSharedSettings = false
+        }
+    }
+
+    private func inspectSharedServer() {
+        sharedBusy = true; sharedMessage = ""
+        Task { defer { sharedBusy = false }; do { sharedStatus = try await NativeBridge.call("GetSharedServerStatus", [sharedServerID], timeoutSeconds: 25) } catch { sharedMessage = error.localizedDescription } }
+    }
+
+    private func sharedJSON(_ value: J) -> String {
+        if value.isNull { return "已删除" }
+        guard JSONSerialization.isValidJSONObject(value.raw),
+              let data = try? JSONSerialization.data(withJSONObject: value.raw, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else { return value.string }
+        return text
+    }
+
+    private func copySharedConflict(_ conflict: J) {
+        var lines = ["共享工作区冲突", "请求 ID：\(conflict.id)", "错误：\(conflict["error"].string)"]
+        for item in conflict["items"].array {
+            lines.append("\n\(item["kind"].string) · \(item["id"].string)")
+            lines.append("本机：\(sharedJSON(item["local"]))")
+            lines.append("远端：\(sharedJSON(item["remote"]))")
+        }
+        if conflict["hasSecrets"].bool { lines.append("\n包含加密凭据变更；凭据内容未复制。") }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
+        copiedConflictID = conflict.id
+    }
+
+    private func loadWorkspaceStatus() {
+        guard workspaceAction.isEmpty else { return }
+        workspaceAction = "status"; workspaceFeedback = "正在读取共享工作区状态…"; workspaceFailed = false
+        Task {
+            defer { workspaceAction = "" }
+            do {
+                workspaceStatus = try await NativeBridge.call("GetSharedWorkspaceStatus")
+                workspaceFeedback = workspaceStatus["mode"].string == "shared" ? "状态已更新" : "当前使用本机工作区"
+                if workspaceStatus["mode"].string == "shared" && !model.sharedSyncError.isEmpty {
+                    workspaceFeedback = model.sharedSyncError
+                    workspaceFailed = true
+                }
+                if workspaceStatus["mode"].string == "shared" && workspaceStatus["unlocked"].bool {
+                    sharedDevices = try await NativeBridge.call("ListSharedDevices", timeoutSeconds: 35).array
+                }
+            }
+            catch { workspaceFeedback = error.localizedDescription; workspaceFailed = true }
+        }
+    }
+
+    private func loadSharedDevices() {
+        guard workspaceAction.isEmpty && workspaceStatus["unlocked"].bool else { return }
+        workspaceAction = "devices"; workspaceFeedback = "正在读取设备…"; workspaceFailed = false
+        Task {
+            defer { workspaceAction = "" }
+            do {
+                sharedDevices = try await NativeBridge.call("ListSharedDevices", timeoutSeconds: 35).array
+                workspaceFeedback = "设备列表已更新"
+            } catch { workspaceFeedback = error.localizedDescription; workspaceFailed = true }
+        }
+    }
+
+    private func revokeSharedDevice(_ id: String) {
+        guard workspaceAction.isEmpty else { return }
+        workspaceAction = "revoke"; workspaceFeedback = "正在撤销设备…"; workspaceFailed = false
+        Task { defer { workspaceAction = "" }
+            do {
+                _ = try await NativeBridge.call("RevokeSharedDevice", [id], timeoutSeconds: 35)
+                sharedDevices = try await NativeBridge.call("ListSharedDevices").array
+                workspaceFeedback = "设备已撤销"
+            } catch { workspaceFeedback = error.localizedDescription; workspaceFailed = true }
+        }
+    }
+
+    private func previewMigration() {
+        guard workspaceAction.isEmpty else { return }
+        workspaceAction = "preview"; workspaceFeedback = "正在生成迁移预览…"; workspaceFailed = false; migrationPreview = J(nil)
+        Task { defer { workspaceAction = "" }
+            do {
+                migrationPreview = try await NativeBridge.call("PreviewSharedWorkspaceMigration", [sharedServerID], timeoutSeconds: 45)
+                workspaceFeedback = "迁移预览已更新"
+            } catch { workspaceFeedback = error.localizedDescription; workspaceFailed = true }
+        }
+    }
+
+    private func migrateWorkspace() {
+        guard workspaceAction.isEmpty else { return }
+        workspaceAction = "migrate"; workspaceFeedback = "正在备份并迁移本机数据…"; workspaceFailed = false
+        Task { defer { workspaceAction = "" }
+            do {
+                let result = try await NativeBridge.call("StartSharedWorkspaceMigration", [sharedServerID], timeoutSeconds: 300)
+                migrationPreview = J(nil)
+                workspaceStatus = result["status"]
+                workspaceFeedback = "已迁移 \(result["count"].int) 条配置"
+                await model.refresh()
+            } catch { workspaceFeedback = error.localizedDescription; workspaceFailed = true }
+        }
+    }
+
+    private func syncWorkspace() {
+        guard workspaceAction.isEmpty else { return }
+        workspaceAction = "sync"; workspaceFeedback = "正在同步共享工作区…"; workspaceFailed = false
+        Task { defer { workspaceAction = "" }
+            do {
+                workspaceStatus = try await NativeBridge.call("ReconcileSharedWorkspace", timeoutSeconds: 180)
+                await model.refresh()
+                if model.sharedSyncError.isEmpty {
+                    workspaceFeedback = "共享工作区已同步"
+                } else {
+                    workspaceFeedback = model.sharedSyncError
+                    workspaceFailed = true
+                }
+            } catch { workspaceFeedback = error.localizedDescription; workspaceFailed = true }
+        }
+    }
+
+    private func createPairingCode() {
+        guard workspaceAction.isEmpty else { return }
+        workspaceAction = "pair"; workspaceFeedback = "正在生成设备配对码…"; workspaceFailed = false
+        Task { defer { workspaceAction = "" }
+            do {
+                pairingCode = try await NativeBridge.call("NewSharedPairingCode", timeoutSeconds: 35)["code"].string
+                workspaceFeedback = "配对码已生成，10 分钟内有效"
+            } catch { workspaceFeedback = error.localizedDescription; workspaceFailed = true }
+        }
+    }
+
+    private func joinWorkspace() {
+        guard workspaceAction.isEmpty else { return }
+        workspaceAction = "join"; workspaceFeedback = "正在通过 SSH 隧道加入共享工作区…"; workspaceFailed = false
+        Task { defer { workspaceAction = "" }
+            do {
+                let result = try await NativeBridge.call("JoinSharedWorkspace", [sharedServerID, joinCode, deviceName], timeoutSeconds: 300)
+                workspaceStatus = result["status"]
+                joinCode = ""
+                workspaceFeedback = "已加入共享工作区，同步 \(result["count"].int) 条配置。请选择本机 SSH 私钥和项目目录。"
+                await model.refresh()
+            } catch { workspaceFeedback = error.localizedDescription; workspaceFailed = true }
+        }
+    }
+
+    private func loadSharedConflicts() {
+        guard workspaceAction.isEmpty else { return }
+        workspaceAction = "conflicts"; workspaceFeedback = "正在读取冲突…"; workspaceFailed = false
+        Task { defer { workspaceAction = "" }
+            do {
+                sharedConflicts = try await NativeBridge.call("ListSharedConflicts", timeoutSeconds: 60).array
+                workspaceFeedback = sharedConflicts.isEmpty ? "当前没有冲突" : "已读取 \(sharedConflicts.count) 条冲突"
+                workspaceStatus = try await NativeBridge.call("GetSharedWorkspaceStatus")
+            } catch { workspaceFeedback = error.localizedDescription; workspaceFailed = true }
+        }
+    }
+
+    private func resolveSharedConflict(_ id: String, choice: String) {
+        guard workspaceAction.isEmpty else { return }
+        workspaceAction = "resolve"; workspaceFeedback = "正在处理冲突…"; workspaceFailed = false
+        Task { defer { workspaceAction = "" }
+            do {
+                _ = try await NativeBridge.call("ResolveSharedConflict", [id, choice], timeoutSeconds: 90)
+                sharedConflicts = try await NativeBridge.call("ListSharedConflicts").array
+                workspaceStatus = try await NativeBridge.call("GetSharedWorkspaceStatus")
+                await model.refresh()
+                workspaceFeedback = "冲突已处理"
+            } catch { workspaceFeedback = error.localizedDescription; workspaceFailed = true }
+        }
+    }
+
+    private func planSharedServer() {
+        sharedBusy = true; sharedMessage = ""
+        Task { defer { sharedBusy = false }; do { sharedPlan = try await NativeBridge.call("PlanSharedServerDeployment", [sharedServerID, sharedDatabaseID, sharedDatabaseName, sharedSkipTLSVerify], timeoutSeconds: 45) } catch { sharedMessage = error.localizedDescription } }
+    }
+
+    private func loadSharedSchemas() {
+        guard !sharedDatabaseID.isEmpty else { return }
+        sharedBusy = true
+        Task { defer { sharedBusy = false }; do {
+            sharedSchemas = try await NativeBridge.call("ListDatabaseSchemas", [sharedDatabaseID], timeoutSeconds: 25).array
+            sharedMessage = ""
+        } catch { sharedMessage = "读取数据库列表失败：" + error.localizedDescription } }
+    }
+
+    private func deploySharedServer() {
+        sharedBusy = true; sharedMessage = ""
+        Task { defer { sharedBusy = false }; do {
+            let job = try await NativeBridge.call("DeploySharedServer", [sharedServerID, sharedDatabaseID, sharedDatabaseName, sharedSkipTLSVerify], timeoutSeconds: 45)
+            sharedPlan = J(nil)
+            for _ in 0..<150 {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                sharedJob = try await NativeBridge.call("GetJob", [job.id])
+                if sharedJob["status"].string == "succeeded" {
+                    sharedMessage = "共享服务部署成功，远程 MySQL 健康检查通过。"
+                    sharedStatus = try await NativeBridge.call("GetSharedServerStatus", [sharedServerID], timeoutSeconds: 25)
+                    return
+                }
+                if ["failed", "canceled"].contains(sharedJob["status"].string) {
+                    sharedMessage = sharedJob["error"].string.isEmpty ? "部署失败，请查看任务详情。" : sharedJob["error"].string
+                    return
+                }
+            }
+            sharedMessage = "部署仍在执行，可稍后刷新状态。"
+        } catch { sharedMessage = error.localizedDescription } }
+    }
+
     private func card<Content: View>(_ title: String, _ subtitle: String, symbol: String,
                                      @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -441,5 +879,25 @@ private struct SettingsDangerButtonStyle: ButtonStyle {
                         in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8)
                 .strokeBorder(Color.red.opacity(0.20), lineWidth: 1))
+    }
+}
+
+private struct SharedWorkspaceButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+    var primary = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 12, weight: primary ? .semibold : .medium))
+            .foregroundStyle(isEnabled ? (primary ? Color.white : DeployStyle.green) : DeployStyle.muted.opacity(0.75))
+            .padding(.horizontal, primary ? 15 : 12)
+            .frame(height: primary ? 34 : 32)
+            .background(isEnabled ? (primary ? DeployStyle.green : configuration.isPressed ? DeployStyle.greenSoft : Color.white) : DeployStyle.overviewPanel,
+                        in: RoundedRectangle(cornerRadius: primary ? 9 : 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: primary ? 9 : 8, style: .continuous)
+                    .strokeBorder(isEnabled ? DeployStyle.line : DeployStyle.line.opacity(0.55), lineWidth: 1)
+            }
+            .opacity(isEnabled ? 1 : 0.72)
     }
 }

@@ -16,6 +16,9 @@ struct DeploymentsPage: View {
     @State private var releaseMonitor: Task<Void, Never>?
     @State private var environment = J(nil)
     @State private var domainBindings: [J] = []
+    @State private var pathRoutes: [J] = []
+    @State private var editingPathRoute: J?
+    @State private var showingPathEditor = false
     @State private var loadingDetail = false
     @State private var loadedDetailID: String?
     @State private var detailLoadID = UUID()
@@ -148,15 +151,39 @@ struct DeploymentsPage: View {
                     }
                     VStack(alignment: .leading, spacing: 14) {
                         HStack {
-                            SectionHeading("域名与访问", "当前保存的域名目标")
+                            SectionHeading("域名与访问", "为当前部署配置独立域名或共享域名下的访问路径")
                             Spacer()
+                            Button("添加访问路径") {
+                                editingPathRoute = nil
+                                showingPathEditor = true
+                            }
+                            .buttonStyle(DeploySecondaryButtonStyle())
                             Button("管理域名") { model.section = .domains }
                                 .buttonStyle(DeploySecondaryButtonStyle())
                         }
-                        if domainBindings.isEmpty {
-                            Text("暂无域名绑定草稿。可前往域名页面选择根域名或子域名，配置此部署为目标。")
+                        if !pathRoutes.isEmpty {
+                            Rectangle().fill(DeployStyle.line).frame(height: 1)
+                            ForEach(pathRoutes, id: \.id) { route in
+                                HStack(spacing: 10) {
+                                    Text(route["fqdn"].string + route["pathPrefix"].string)
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .textSelection(.enabled)
+                                    Spacer()
+                                    Text(route["status"].string == "active" ? "已应用" : route["status"].string == "draft" ? "草稿" : "处理中")
+                                        .font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
+                                    Button("管理路径") {
+                                        editingPathRoute = route
+                                        showingPathEditor = true
+                                    }
+                                    .buttonStyle(DeploySecondaryButtonStyle())
+                                }
+                            }
+                        }
+                        if domainBindings.isEmpty && pathRoutes.isEmpty {
+                            Text("尚未配置域名访问。可在此添加访问路径，或前往域名页面绑定独立域名。")
                                 .font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
-                        } else {
+                        }
+                        if !domainBindings.isEmpty {
                             ForEach(domainBindings, id: \.hostID) { item in
                                 HStack {
                                     Text(item["fqdn"].string).font(.system(size: 12, weight: .semibold))
@@ -315,6 +342,7 @@ struct DeploymentsPage: View {
             releases = []
             environment = J(nil)
             domainBindings = []
+            pathRoutes = []
             loadedDetailID = nil
             loadingDetail = selectedID != nil
         }
@@ -334,6 +362,14 @@ struct DeploymentsPage: View {
             if let selected {
                 EnvironmentEditorView(deployment: selected) {
                     if selectedID == selected.id { environment = $0 }
+                }
+                .environmentObject(model)
+            }
+        }
+        .sheet(isPresented: $showingPathEditor) {
+            if let selected {
+                SharedPathEditor(route: editingPathRoute, fixedDeploymentID: selected.id) {
+                    loadPathRoutes(selected.id)
                 }
                 .environmentObject(model)
             }
@@ -378,14 +414,23 @@ struct DeploymentsPage: View {
             let nextReleases = (await model.perform("ListDeploymentReleases", [id], refreshAfter: false) ?? J(nil)).array
             let nextEnvironment = await model.perform("ListDeploymentEnvironment", [id], refreshAfter: false) ?? J(nil)
             let nextDomainBindings = (await model.perform("ListDeploymentDomains", [id], refreshAfter: false) ?? J(nil)).array
+            let nextPathRoutes = (try? await NativeBridge.call("ListSharedPathRoutes").array) ?? []
             guard selectedID == id, detailLoadID == requestID else { return }
             runtime = nextRuntime
             releases = nextReleases
             environment = nextEnvironment
             domainBindings = nextDomainBindings
+            pathRoutes = nextPathRoutes.filter { $0["deploymentId"].string == id }
             loadedDetailID = id
             loadingDetail = false
             monitorReleaseJobs(id)
+        }
+    }
+
+    private func loadPathRoutes(_ id: String) {
+        Task {
+            guard let routes = try? await NativeBridge.call("ListSharedPathRoutes").array, selectedID == id else { return }
+            pathRoutes = routes.filter { $0["deploymentId"].string == id }
         }
     }
 
@@ -605,18 +650,25 @@ struct PublishView: View {
     let onPublished: (J) -> Void
     @State private var registryID = ""
     @State private var version = ""
+    @State private var readyIngresses: [String] = []
+    @State private var ingressFQDN = ""
+    @State private var publishPath = ""
+    @State private var containerPort = ""
+    @State private var serviceName = ""
+    @State private var ingressError = ""
     @State private var preflight = J(nil)
     @State private var preflightProgress = J(nil)
     @State private var activePreflightID = ""
     @State private var checkStartedAt = Date()
     @State private var checking = false
     @State private var publishing = false
+    @State private var publishStage = ""
     @State private var checkError = ""
     @State private var publishError = ""
     @State private var copied = false
 
     private var trimmedVersion: String { version.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var canPublish: Bool { preflight["ok"].bool && !trimmedVersion.isEmpty && !publishing && !checking }
+    private var canPublish: Bool { !publishing && !checking && !ingressFQDN.isEmpty && !publishPath.isEmpty && (Int(containerPort) ?? 0) > 0 && (Int(containerPort) ?? 0) <= 65535 }
     private var visibleChecks: [J] { checking ? preflightProgress["checks"].array : preflight["checks"].array }
     private var checkSummary: String {
         let heading = checking ? "发布前检查：进行中" :
@@ -651,6 +703,28 @@ struct PublishView: View {
                         TextField("版本", text: $version)
                             .textFieldStyle(.roundedBorder)
                             .accessibilityLabel("发布版本")
+                        Rectangle().fill(DeployStyle.line).frame(height: 1)
+                        Text("应用 HTTPS 路径")
+                            .font(.system(size: 12, weight: .semibold)).foregroundStyle(DeployStyle.ink)
+                        if readyIngresses.isEmpty {
+                            Text(ingressError.isEmpty ? "请先到设置 → 应用入口，完成目标服务器的域名和 HTTPS 配置。" : ingressError)
+                                .font(.system(size: 11)).foregroundStyle(.orange)
+                        } else {
+                            Picker("入口域名", selection: $ingressFQDN) {
+                                Text("选择已就绪域名").tag("")
+                                ForEach(readyIngresses, id: \.self) { value in Text(value).tag(value) }
+                            }
+                            TextField("项目路径名，例如 demo", text: $publishPath)
+                                .textFieldStyle(.roundedBorder)
+                                .accessibilityLabel("项目发布路径")
+                            TextField("应用容器内部 HTTP 端口", text: $containerPort)
+                                .textFieldStyle(.roundedBorder)
+                                .accessibilityLabel("应用容器端口")
+                            TextField("容器名称或 Compose 服务名（多个后端时填写）", text: $serviceName)
+                                .textFieldStyle(.roundedBorder)
+                            Text("发布成功后访问 https://\(ingressFQDN.isEmpty ? "域名" : ingressFQDN)/\(publishPath.trimmingCharacters(in: CharacterSet(charactersIn: "/")))/。单容器构建和运行会自动收到 IDEPLOY_BASE_PATH；Compose 服务需在配置中引用它。项目应据此配置资源、路由和 API 路径。仅支持单级路径；更换已有生效路径前需先解除旧路由。")
+                                .font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
+                        }
                     }
                     .padding(18)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -723,19 +797,38 @@ struct PublishView: View {
                     .padding(18)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .deployCard()
-                    if !publishError.isEmpty {
-                        Text(publishError).foregroundStyle(.red).textSelection(.enabled)
-                    }
                 }
                 .padding(24)
             }
             .background(DeployStyle.canvas)
             Rectangle().fill(DeployStyle.line).frame(height: 1)
+            if publishing || !publishError.isEmpty {
+                HStack(alignment: .top, spacing: 10) {
+                    if publishing { ProgressView().controlSize(.small) }
+                    Text(publishing ? publishStage : publishError)
+                        .foregroundStyle(publishing ? DeployStyle.ink : .red)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if !publishError.isEmpty {
+                        Button("复制错误") {
+                            NSPasteboard.general.clearContents()
+                            _ = NSPasteboard.general.setString(publishError, forType: .string)
+                        }
+                        .buttonStyle(DeploySecondaryButtonStyle())
+                    }
+                }
+                .font(.system(size: 12))
+                .padding(.horizontal, 24)
+                .padding(.vertical, 12)
+                .background(DeployStyle.overviewPanel)
+            }
             HStack(spacing: 12) {
                 Button("检查就绪状态") { runPreflight() }
                     .buttonStyle(DeploySecondaryButtonStyle())
-                    .disabled(registryID.isEmpty || checking || publishing)
-                if registryID.isEmpty {
+                    .disabled(registryID.isEmpty || ingressFQDN.isEmpty || checking || publishing)
+                if readyIngresses.isEmpty {
+                    Text("请先配置应用入口").foregroundStyle(DeployStyle.muted)
+                } else if registryID.isEmpty {
                     Text("请先选择镜像仓库").foregroundStyle(DeployStyle.muted)
                 } else if trimmedVersion.isEmpty {
                     Text("请填写发布版本").foregroundStyle(DeployStyle.muted)
@@ -747,6 +840,7 @@ struct PublishView: View {
                 }
                 Spacer()
                 Button("取消") { dismiss() }
+                    .buttonStyle(DeploySecondaryButtonStyle(height: 34))
                     .disabled(publishing)
                 Button(publishing ? "正在提交…" : "开始发布") { publish() }
                     .buttonStyle(DeployPrimaryButtonStyle())
@@ -757,10 +851,28 @@ struct PublishView: View {
             .padding(.vertical, 16)
             .background(DeployStyle.overviewPanel)
         }
-        .frame(width: 680, height: 560)
+        .frame(width: 680, height: 680)
         .environment(\.colorScheme, .light)
         .task {
             if model.registries.count == 1 { registryID = model.registries[0].id }
+            do {
+                readyIngresses = try await NativeBridge.call("ListInternalIngresses").array
+                    .filter { $0["status"].string == "ready" && $0["serverId"].string == deployment["serverId"].string }
+                    .map { $0["fqdn"].string }
+                if readyIngresses.count == 1 { ingressFQDN = readyIngresses[0] }
+            } catch { ingressError = error.localizedDescription }
+            if let existing = try? await NativeBridge.call("ListSharedPathRoutes"),
+               let route = existing.array.first(where: { $0["deploymentId"].string == deployment.id && $0["status"].string == "active" }),
+               readyIngresses.contains(route["fqdn"].string) {
+                ingressFQDN = route["fqdn"].string
+                publishPath = route["pathPrefix"].string.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                containerPort = route["containerPort"].string
+                serviceName = route["serviceName"].string
+            }
+            let ports = deployment["containerPorts"].array.map(\.string)
+            if containerPort.isEmpty, let first = ports.first {
+                containerPort = first.split(separator: ":").last.map(String.init) ?? ""
+            }
             if let suggestion = try? await NativeBridge.call("DetectDeploymentVersion", [deployment.id]), version.isEmpty {
                 version = suggestion["version"].string
             }
@@ -770,6 +882,10 @@ struct PublishView: View {
             checkError = ""
             copied = false
         }
+        .onChange(of: ingressFQDN) { _ in preflight = J(nil) }
+        .onChange(of: publishPath) { _ in preflight = J(nil) }
+        .onChange(of: containerPort) { _ in preflight = J(nil) }
+        .onChange(of: serviceName) { _ in preflight = J(nil) }
         .onDisappear {
             activePreflightID = ""
         }
@@ -777,7 +893,15 @@ struct PublishView: View {
 
     private func runPreflight() {
         guard !registryID.isEmpty else { return }
+        guard !ingressFQDN.isEmpty, !publishPath.isEmpty, let port = Int(containerPort), port > 0, port <= 65535 else {
+            checkError = "请先选择入口域名、项目路径和有效的容器端口。"
+            return
+        }
         let selectedRegistryID = registryID
+        let selectedFQDN = ingressFQDN
+        let selectedPath = publishPath
+        let selectedService = serviceName
+        let selectedPort = port
         checking = true
         checkStartedAt = Date()
         checkError = ""
@@ -799,9 +923,10 @@ struct PublishView: View {
             defer { checking = false }
             do {
                 preflight = try await NativeBridge.call("PreflightDeployment",
-                    [["deploymentId": deployment.id, "registryId": selectedRegistryID, "requestId": requestID]],
+                    [["deploymentId": deployment.id, "registryId": selectedRegistryID, "requestId": requestID,
+                      "fqdn": selectedFQDN, "pathPrefix": selectedPath, "serviceName": selectedService, "containerPort": selectedPort]],
                     timeoutSeconds: 195)
-                if registryID != selectedRegistryID { preflight = J(nil) }
+                if registryID != selectedRegistryID || ingressFQDN != selectedFQDN || publishPath != selectedPath || serviceName != selectedService || (Int(containerPort) ?? 0) != selectedPort { preflight = J(nil) }
             } catch {
                 if registryID == selectedRegistryID { checkError = error.localizedDescription }
             }
@@ -810,15 +935,53 @@ struct PublishView: View {
 
     private func publish() {
         guard canPublish else { return }
+        guard !ingressFQDN.isEmpty, !publishPath.isEmpty, let port = Int(containerPort), port > 0, port <= 65535 else {
+            publishError = "请选择已就绪的入口域名、项目路径和有效的容器端口。"
+            return
+        }
+        guard !registryID.isEmpty else {
+            publishError = "请先选择镜像仓库。"
+            return
+        }
+        guard !trimmedVersion.isEmpty else {
+            publishError = "请先填写发布版本。"
+            return
+        }
+        guard !preflight.isNull else {
+            publishError = checkError.isEmpty ? "请先点击“检查就绪状态”，检查通过后再发布。" : "发布前检查失败：\(checkError)"
+            return
+        }
+        guard preflight["ok"].bool else {
+            publishError = "发布前检查未通过，请处理失败项后重新检查。"
+            return
+        }
         publishing = true
+        publishStage = "正在检查本机 SSH、Docker 和 Git…"
         publishError = ""
         Task {
             defer { publishing = false }
             do {
+                let overview = try await NativeBridge.call("GetOverview", timeoutSeconds: 30)
+                let tools = overview["tools"].array
+                guard !tools.isEmpty else {
+                    publishError = "未能读取本机工具状态，请重试。"
+                    return
+                }
+                let unavailable = tools.filter { ["SSH", "Docker", "Git"].contains($0["name"].string) && !$0["available"].bool }
+                guard unavailable.isEmpty else {
+                    publishError = "本机发布环境未就绪：\n" + unavailable.map {
+                        let name = $0["name"].string
+                        let suggestion = name == "Docker" ? "请启动 Docker Desktop，等待引擎就绪后重试。" : "请安装或修复该工具后重试。"
+                        return "• \(name)：\($0["detail"].string)\n  \(suggestion)"
+                    }.joined(separator: "\n")
+                    return
+                }
+                publishStage = "本机工具已就绪，正在创建发布任务…"
                 let input: [String: Any] = [
-                    "deploymentId": deployment.id, "registryId": registryID, "version": trimmedVersion
+                    "deploymentId": deployment.id, "registryId": registryID, "version": trimmedVersion,
+                    "fqdn": ingressFQDN, "pathPrefix": publishPath, "serviceName": serviceName, "containerPort": port
                 ]
-                let job = try await NativeBridge.call("PublishDeployment", [input])
+                let job = try await NativeBridge.call("PublishDeployment", [input], timeoutSeconds: 140)
                 onPublished(job)
                 dismiss()
             } catch {

@@ -85,8 +85,8 @@ func deployContainer(ctx context.Context, req OperationRequest) (ContainerReplac
 			_, restoreErr := docker(ctx, "rename", backup, name)
 			return ContainerReplacement{}, fmt.Errorf("stop existing container: %w; restore: %v", err, restoreErr)
 		}
-	} else if !strings.Contains(string(inspect), "No such object") {
-		return ContainerReplacement{}, fmt.Errorf("inspect existing container: %w", inspectErr)
+	} else if !strings.Contains(string(inspect), "No such object") && !strings.Contains(string(inspect), "No such container") {
+		return ContainerReplacement{}, fmt.Errorf("inspect existing container: %w: %.200s", inspectErr, strings.TrimSpace(string(inspect)))
 	}
 	if _, err := docker(ctx, args...); err != nil {
 		_, _ = docker(ctx, "rm", "-f", name)

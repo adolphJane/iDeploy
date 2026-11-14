@@ -1,0 +1,46 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ideploy
+      POSTGRES_USER: ideploy
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - workspace_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ideploy -d ideploy"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  server:
+    build:
+      context: ../..
+      dockerfile: build/shared-server/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      IDEPLOY_DATABASE_URL_FILE: /run/secrets/database_url
+      IDEPLOY_SERVER_TOKEN_FILE: /run/secrets/server_token
+      IDEPLOY_SERVER_LISTEN: 0.0.0.0:8765
+    secrets:
+      - database_url
+      - server_token
+    ports:
+      - "127.0.0.1:8765:8765"
+
+volumes:
+  workspace_db:
+
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
+  database_url:
+    file: ./secrets/database_url
+  server_token:
+    file: ./secrets/server_token

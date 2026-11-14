@@ -140,10 +140,14 @@ func (s *SystemService) planDomainBinding(ctx context.Context, hostID, mode stri
 		desired := make([]server.IngressRoute, 0, len(routes)+1)
 		for _, route := range routes {
 			if route.HostID != hostID {
-				desired = append(desired, server.IngressRoute{FQDN: route.FQDN, HostIP: route.HostIP, HostPort: route.HostPort, UpstreamScheme: route.UpstreamScheme, Certificate: route.Certificate, CertificateKey: route.CertificateKey})
+				desired = append(desired, server.IngressRoute{FQDN: route.FQDN, PathPrefix: route.PathPrefix, HostIP: route.HostIP, HostPort: route.HostPort, UpstreamScheme: route.UpstreamScheme, Certificate: route.Certificate, CertificateKey: route.CertificateKey})
 			}
 		}
 		desired = append(desired, deploymentIngressRoute(host.FQDN, endpoint, b))
+		desired, routeErr = appendInternalGatewayRoutes(ctx, store, target.ServerID, desired)
+		if routeErr != nil {
+			return plan, routeErr
+		}
 		item, _, preview, previewErr := remote.PreviewExistingNginx(ctx, connection, desired, ingress.ConfigHash)
 		if previewErr != nil {
 			plan.Detail = previewErr.Error()
@@ -181,7 +185,7 @@ func (s *SystemService) planDomainBinding(ctx context.Context, hostID, mode stri
 		desired := []server.IngressRoute{}
 		for _, route := range routes {
 			if route.HostID != hostID {
-				desired = append(desired, server.IngressRoute{FQDN: route.FQDN, HostIP: route.HostIP, HostPort: route.HostPort, UpstreamScheme: route.UpstreamScheme, Certificate: route.Certificate, CertificateKey: route.CertificateKey})
+				desired = append(desired, server.IngressRoute{FQDN: route.FQDN, PathPrefix: route.PathPrefix, HostIP: route.HostIP, HostPort: route.HostPort, UpstreamScheme: route.UpstreamScheme, Certificate: route.Certificate, CertificateKey: route.CertificateKey})
 			}
 		}
 		desired = append(desired, deploymentIngressRoute(host.FQDN, endpoint, b))
@@ -416,7 +420,7 @@ func (s *SystemService) domainBindingHandler(ctx context.Context, task job.Job, 
 		if route.HostID == p.HostID {
 			continue
 		}
-		desired = append(desired, server.IngressRoute{FQDN: route.FQDN, HostIP: route.HostIP, HostPort: route.HostPort, UpstreamScheme: route.UpstreamScheme, Certificate: route.Certificate, CertificateKey: route.CertificateKey})
+		desired = append(desired, server.IngressRoute{FQDN: route.FQDN, PathPrefix: route.PathPrefix, HostIP: route.HostIP, HostPort: route.HostPort, UpstreamScheme: route.UpstreamScheme, Certificate: route.Certificate, CertificateKey: route.CertificateKey})
 	}
 	if !removing {
 		desired = append(desired, deploymentIngressRoute(host.FQDN, endpoint, b))
@@ -432,6 +436,10 @@ func (s *SystemService) domainBindingHandler(ctx context.Context, task job.Job, 
 		p.Mode = "nginx"
 	}
 	if p.Mode == "nginx" {
+		desired, err = appendInternalGatewayRoutes(ctx, store, target.ServerID, desired)
+		if err != nil {
+			return err
+		}
 		state, inspectErr := remote.InspectManagedIngress(ctx, connection)
 		if inspectErr != nil {
 			return inspectErr

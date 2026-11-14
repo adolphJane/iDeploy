@@ -10,9 +10,11 @@ import (
 )
 
 const (
-	sshPasswordService      = "com.ideploy.ssh.password"
-	sshKeyPassphraseService = "com.ideploy.ssh.key-passphrase"
-	agentPairingService     = "com.ideploy.agent.pairing"
+	sshPasswordService       = "com.ideploy.ssh.password"
+	sshKeyPassphraseService  = "com.ideploy.ssh.key-passphrase"
+	agentPairingService      = "com.ideploy.agent.pairing"
+	sharedServerTokenService = "com.ideploy.shared-server.token"
+	sharedVaultKeyService    = "com.ideploy.shared-server.vault-key"
 )
 
 var ErrCredentialUnavailable = errors.New("SSH 密码凭据不可用")
@@ -26,6 +28,12 @@ func PrivateKeyPassphraseCredentialRef(serverID string) string {
 }
 
 func AgentPairingCredentialRef(serverID string) string { return "keychain:agent-pairing:" + serverID }
+func SharedServerTokenCredentialRef(serverID string) string {
+	return "keychain:shared-server-token:" + serverID
+}
+func SharedVaultKeyCredentialRef(serverID string) string {
+	return "keychain:shared-vault-key:" + serverID
+}
 
 func credentialLocation(ref string) (service, account string, ok bool) {
 	for _, value := range []struct {
@@ -35,6 +43,8 @@ func credentialLocation(ref string) (service, account string, ok bool) {
 		{prefix: "keychain:ssh-password:", service: sshPasswordService},
 		{prefix: "keychain:ssh-key-passphrase:", service: sshKeyPassphraseService},
 		{prefix: "keychain:agent-pairing:", service: agentPairingService},
+		{prefix: "keychain:shared-server-token:", service: sharedServerTokenService},
+		{prefix: "keychain:shared-vault-key:", service: sharedVaultKeyService},
 	} {
 		if strings.HasPrefix(ref, value.prefix) {
 			account = strings.TrimPrefix(ref, value.prefix)

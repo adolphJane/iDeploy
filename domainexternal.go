@@ -110,10 +110,14 @@ func (s *SystemService) PlanExternalRoute(hostID string) (ExternalRoutePlan, err
 	desired := make([]server.IngressRoute, 0, len(routes)+1)
 	for _, route := range routes {
 		if route.HostID != hostID {
-			desired = append(desired, server.IngressRoute{FQDN: route.FQDN, HostIP: route.HostIP, HostPort: route.HostPort, UpstreamScheme: route.UpstreamScheme, Certificate: route.Certificate, CertificateKey: route.CertificateKey})
+			desired = append(desired, server.IngressRoute{FQDN: route.FQDN, PathPrefix: route.PathPrefix, HostIP: route.HostIP, HostPort: route.HostPort, UpstreamScheme: route.UpstreamScheme, Certificate: route.Certificate, CertificateKey: route.CertificateKey})
 		}
 	}
 	desired = append(desired, externalIngressRoute(host.FQDN, v))
+	desired, err = appendInternalGatewayRoutes(ctx, store, v.ServerID, desired)
+	if err != nil {
+		return plan, err
+	}
 	item, _, preview, err := remote.PreviewExistingNginx(ctx, connection, desired, ingress.ConfigHash)
 	if err != nil {
 		plan.Detail = err.Error()
@@ -286,11 +290,15 @@ func (s *SystemService) externalRouteHandler(ctx context.Context, task job.Job, 
 	desired := make([]server.IngressRoute, 0, len(routes)+1)
 	for _, route := range routes {
 		if route.HostID != p.HostID {
-			desired = append(desired, server.IngressRoute{FQDN: route.FQDN, HostIP: route.HostIP, HostPort: route.HostPort, UpstreamScheme: route.UpstreamScheme, Certificate: route.Certificate, CertificateKey: route.CertificateKey})
+			desired = append(desired, server.IngressRoute{FQDN: route.FQDN, PathPrefix: route.PathPrefix, HostIP: route.HostIP, HostPort: route.HostPort, UpstreamScheme: route.UpstreamScheme, Certificate: route.Certificate, CertificateKey: route.CertificateKey})
 		}
 	}
 	if !removing {
 		desired = append(desired, externalIngressRoute(host.FQDN, v))
+	}
+	desired, err = appendInternalGatewayRoutes(ctx, store, v.ServerID, desired)
+	if err != nil {
+		return err
 	}
 	item, inspectErr := remote.InspectExistingNginx(ctx, connection)
 	if inspectErr != nil {

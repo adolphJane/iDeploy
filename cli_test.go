@@ -27,16 +27,24 @@ func TestLowercaseExecutableSelectsCLIWithoutArguments(t *testing.T) {
 func TestParseCLIPublishArguments(t *testing.T) {
 	request, options, special, err := parseCLIArguments([]string{
 		"deployment", "publish", "deployment-1", "--registry", "registry-1",
+		"--domain", "apps.example.com", "--path", "demo", "--container-port", "8080", "--service", "api",
 		"--version", "v1.2.3", "--json", "--timeout", "45s",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if special != "" || request.Command != "deployment.publish" || request.ID != "deployment-1" || request.RegistryID != "registry-1" || request.Version != "v1.2.3" {
+	if special != "" || request.Command != "deployment.publish" || request.ID != "deployment-1" || request.RegistryID != "registry-1" || request.Version != "v1.2.3" || request.FQDN != "apps.example.com" || request.PathPrefix != "demo" || request.ContainerPort != 8080 || request.ServiceName != "api" {
 		t.Fatalf("unexpected request: %#v, special=%q", request, special)
 	}
 	if !options.JSON || !options.Wait || options.Timeout != 45*time.Second {
 		t.Fatalf("unexpected options: %#v", options)
+	}
+}
+
+func TestParseCLIIngressList(t *testing.T) {
+	request, _, _, err := parseCLIArguments([]string{"ingress", "list", "--json"})
+	if err != nil || request.Command != "internal.ingress.list" {
+		t.Fatalf("unexpected ingress list request: %#v err=%v", request, err)
 	}
 }
 

@@ -49,7 +49,9 @@ func (s *Store) CountServerBindings(ctx context.Context, serverID string) (int, 
 	var count int
 	err := s.db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM domain_bindings b
         JOIN deployment_targets d ON d.id=b.deployment_id WHERE d.server_id=?) +
-        (SELECT COUNT(*) FROM nginx_external_routes WHERE server_id=?)`, serverID, serverID).Scan(&count)
+		(SELECT COUNT(*) FROM nginx_external_routes WHERE server_id=?) +
+		(SELECT COUNT(*) FROM shared_path_routes p JOIN deployment_targets d ON d.id=p.deployment_id WHERE d.server_id=?) +
+		(SELECT COUNT(*) FROM internal_ingresses WHERE server_id=?)`, serverID, serverID, serverID, serverID).Scan(&count)
 	return count, err
 }
 

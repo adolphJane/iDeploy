@@ -1,0 +1,24 @@
+services:
+  server:
+    build:
+      context: ../..
+      dockerfile: build/shared-server/Dockerfile
+    restart: unless-stopped
+    environment:
+      IDEPLOY_DATABASE_DRIVER: mysql
+      IDEPLOY_DB_HOST: ${IDEPLOY_DB_HOST:?MySQL host required}
+      IDEPLOY_DB_PORT: ${IDEPLOY_DB_PORT:-3306}
+      IDEPLOY_DB_NAME: ${IDEPLOY_DB_NAME:?MySQL database required}
+      IDEPLOY_DB_USER: ${IDEPLOY_DB_USER:?MySQL user required}
+      IDEPLOY_DB_TLS_MODE: ${IDEPLOY_DB_TLS_MODE:-verify}
+      IDEPLOY_DB_PASSWORD: ${IDEPLOY_DB_PASSWORD:?MySQL password required}
+      IDEPLOY_SERVER_TOKEN_FILE: /run/secrets/server_token
+      IDEPLOY_SERVER_LISTEN: 0.0.0.0:8765
+    secrets:
+      - server_token
+    ports:
+      - "127.0.0.1:8765:8765"
+
+secrets:
+  server_token:
+    file: ./secrets/server_token
