@@ -41,6 +41,15 @@ func main() {
 		log.Fatal(err)
 	}
 	defer server.Close()
+	if workerTokenFile := os.Getenv("IDEPLOY_WORKER_TOKEN_FILE"); workerTokenFile != "" {
+		workerToken, readErr := os.ReadFile(workerTokenFile)
+		if readErr != nil {
+			log.Fatal("cannot read worker token file")
+		}
+		if err := server.SetWorkerToken(strings.TrimSpace(string(workerToken))); err != nil {
+			log.Fatal(err)
+		}
+	}
 	address := os.Getenv("IDEPLOY_SERVER_LISTEN")
 	if address == "" {
 		address = "127.0.0.1:8765"

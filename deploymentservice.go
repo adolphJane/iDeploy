@@ -50,7 +50,15 @@ func (s *SystemService) ConfigureDeployment(id string, input DeploymentInput) er
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	if input.BuildMode == "" {
+		current, err := store.Get(ctx, id)
+		if err != nil {
+			return err
+		}
+		input.BuildMode = string(current.BuildMode)
+	}
 	return store.Configure(ctx, id, deployment.Input{
+		BuildMode:    deployment.BuildMode(input.BuildMode),
 		WorkloadKind: input.WorkloadKind, WorkloadName: input.WorkloadName,
 		ContainerPorts: input.ContainerPorts, RestartPolicy: input.RestartPolicy,
 	})
@@ -160,6 +168,26 @@ func (s *SystemService) publishDeployment(input DeploymentReleaseInput, retryFai
 	if err != nil {
 		return JobView{}, err
 	}
+	if target.BuildMode == deployment.BuildRemote {
+		status, statusErr := s.GetSharedWorkspaceStatus()
+		if statusErr != nil || status.Mode != "shared" {
+			return JobView{}, errors.New("远端构建需要已连接的 iDeploy 共享服务")
+		}
+		projects, projectErr := s.projectStore()
+		if projectErr != nil {
+			return JobView{}, projectErr
+		}
+		projectValue, projectErr := projects.Get(ctx, target.ProjectID)
+		if projectErr != nil {
+			return JobView{}, projectErr
+		}
+		if projectValue.SourceKind != project.SourceGit || target.WorkloadKind == "compose" && projectValue.ComposePath == "" {
+			return JobView{}, errors.New("远端构建需要 Git 来源，Compose 部署还需要配置 Compose 文件")
+		}
+		if err := s.checkRemoteBuildWorker(ctx, status.ServerID, target.WorkloadKind == "compose"); err != nil {
+			return JobView{}, err
+		}
+	}
 	if target.WorkloadName == "" {
 		return JobView{}, errors.New("请先完成部署目标配置")
 	}
@@ -223,10 +251,10 @@ func (s *SystemService) publishDeployment(input DeploymentReleaseInput, retryFai
 	if err != nil {
 		return JobView{}, err
 	}
-	if registryValue.Status != registry.StatusHealthy {
+	if target.BuildMode != deployment.BuildRemote && registryValue.Status != registry.StatusHealthy {
 		return JobView{}, errors.New("镜像仓库尚未通过 Docker 登录测试")
 	}
-	if _, err := loadRegistryPushPassword(ctx, registryValue); err != nil {
+	if _, err := s.registryPasswordForRelease(ctx, registryValue, target.BuildMode == deployment.BuildRemote); err != nil {
 		return JobView{}, err
 	}
 	if target.WorkloadKind == "container" {
@@ -246,7 +274,7 @@ func (s *SystemService) publishDeployment(input DeploymentReleaseInput, retryFai
 		return JobView{}, err
 	}
 	release, err := store.CreateRelease(ctx, deployment.ReleaseInput{
-		DeploymentID: target.ID, RegistryID: input.RegistryID, Action: "deploy", Version: input.Version, AllowRetry: retryFailed,
+		DeploymentID: target.ID, RegistryID: input.RegistryID, Action: "deploy", Version: input.Version, AllowRetry: retryFailed, BuildMode: target.BuildMode,
 	})
 	if err != nil {
 		return JobView{}, err
@@ -346,6 +374,12 @@ func (s *SystemService) RetryRelease(releaseID string) (JobView, error) {
 	if source.RegistryID == "" {
 		return JobView{}, errors.New("失败记录缺少镜像仓库，无法重试")
 	}
+	if source.BuildMode == deployment.BuildRemote && (source.RemoteJobID != "" || (source.JobID != "" && source.DeliveryCommit != "")) && source.ImageRef == "" {
+		source, err = s.recoverRemoteReleaseArtifact(ctx, store, source)
+		if err != nil {
+			return JobView{}, err
+		}
+	}
 	if source.ImageRef == "" && source.Manifest == "" {
 		paths, err := s.domainStore()
 		if err != nil {
@@ -401,7 +435,7 @@ func (s *SystemService) RetryRelease(releaseID string) (JobView, error) {
 	}
 	release, err := store.CreateRelease(ctx, deployment.ReleaseInput{
 		DeploymentID: source.DeploymentID, RegistryID: source.RegistryID, Action: "deploy", Version: source.Version,
-		ImageRef: source.ImageRef, Manifest: source.Manifest, RollbackToID: source.ID, AllowResume: true,
+		ImageRef: source.ImageRef, Manifest: source.Manifest, RollbackToID: source.ID, AllowResume: true, BuildMode: source.BuildMode,
 	})
 	if err != nil {
 		return JobView{}, err

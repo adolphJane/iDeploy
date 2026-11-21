@@ -15,6 +15,15 @@ import (
 	"time"
 )
 
+type agentHTTPStatusError struct {
+	code int
+	body string
+}
+
+func (e *agentHTTPStatusError) Error() string {
+	return fmt.Sprintf("Agent 返回 HTTP %d: %.300s", e.code, e.body)
+}
+
 // AgentGET sends HTTP through SSH's direct TCP forwarding channel (-W).
 // No remote shell command is run and the Agent remains bound to loopback.
 func (r *Remote) AgentGET(parent context.Context, connection Connection, serverID, path string) ([]byte, error) {
@@ -25,7 +34,7 @@ func (r *Remote) AgentGET(parent context.Context, connection Connection, serverI
 }
 
 func (r *Remote) AgentOperation(parent context.Context, connection Connection, serverID string, request []byte) ([]byte, error) {
-	if len(request) > 1024*1024 {
+	if len(request) > 6*1024*1024 {
 		return nil, errors.New("Agent operation request too large")
 	}
 	return r.agentRequest(parent, connection, serverID, http.MethodPost, "/v1/operations", request)
@@ -128,7 +137,7 @@ func (r *Remote) agentRequest(parent context.Context, connection Connection, ser
 			return "", errors.New("Agent response too large")
 		}
 		if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusAccepted {
-			return "", fmt.Errorf("Agent 返回 HTTP %d: %.300s", response.StatusCode, body)
+			return "", &agentHTTPStatusError{code: response.StatusCode, body: string(body)}
 		}
 		return string(body), nil
 	}

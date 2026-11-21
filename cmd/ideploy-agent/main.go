@@ -160,7 +160,8 @@ func main() {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, 1024*1024)
+		// A Compose snapshot embedded in JSON can grow when escaped.
+		r.Body = http.MaxBytesReader(w, r.Body, 6*1024*1024)
 		var request agent.OperationRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			http.Error(w, "invalid operation request", http.StatusBadRequest)

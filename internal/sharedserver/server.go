@@ -19,9 +19,20 @@ import (
 const APIVersion = 2
 
 type Server struct {
-	db        *sql.DB
-	driver    string
-	tokenHash [32]byte
+	db              *sql.DB
+	driver          string
+	tokenHash       [32]byte
+	workerTokenHash [32]byte
+	workerEnabled   bool
+}
+
+func (s *Server) SetWorkerToken(token string) error {
+	if len(token) < 32 {
+		return errors.New("worker token must be at least 32 characters")
+	}
+	s.workerTokenHash = sha256.Sum256([]byte(token))
+	s.workerEnabled = true
+	return nil
 }
 
 func Open(ctx context.Context, dsn, token string) (*Server, error) {
@@ -89,6 +100,10 @@ func OpenWithDriver(ctx context.Context, driver, dsn, token string) (*Server, er
 		}
 	}
 	if err := ensureSyncSchema(ctx, db, driver); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := ensureReleaseJobSchema(ctx, db, driver); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -166,7 +181,32 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /v2/secrets/{id}", s.authorize(s.putSecret))
 	mux.HandleFunc("POST /v2/leases/{id}", s.authorize(s.acquireLease))
 	mux.HandleFunc("DELETE /v2/leases/{id}", s.authorize(s.releaseLease))
+	mux.HandleFunc("POST /v3/worker/releases/claim", s.authorizeWorker(s.claimReleaseJobHTTP))
+	mux.HandleFunc("PATCH /v3/worker/releases/{id}", s.authorizeWorker(s.updateReleaseJobHTTP))
+	mux.HandleFunc("GET /v3/worker/releases/{id}/registry-secret", s.authorizeWorker(s.releaseRegistrySecretHTTP))
+	mux.HandleFunc("GET /v3/worker/releases/{id}/git-secret", s.authorizeWorker(s.releaseGitSecretHTTP))
+	mux.HandleFunc("GET /v3/worker/releases/{id}/build-secrets", s.authorizeWorker(s.releaseBuildSecretsHTTP))
+	mux.HandleFunc("POST /v3/releases", s.authorize(s.createReleaseJobHTTP))
+	mux.HandleFunc("GET /v3/releases/by-request/{id}", s.authorize(s.getReleaseJobByRequestHTTP))
+	mux.HandleFunc("DELETE /v3/releases/by-request/{id}", s.authorize(s.cancelReleaseJobHTTP))
+	mux.HandleFunc("GET /v3/releases/{id}", s.authorize(s.getReleaseJobHTTP))
 	return mux
+}
+
+func (s *Server) authorizeWorker(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.workerEnabled {
+			http.Error(w, "worker unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		auth := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		hash := sha256.Sum256([]byte(auth))
+		if auth == "" || subtle.ConstantTimeCompare(hash[:], s.workerTokenHash[:]) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
 }
 
 func (s *Server) authorize(next http.HandlerFunc) http.HandlerFunc {

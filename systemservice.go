@@ -18,6 +18,7 @@ import (
 	"ideploy/internal/databasebrowser"
 	"ideploy/internal/deployment"
 	"ideploy/internal/domain"
+	"ideploy/internal/gitauth"
 	"ideploy/internal/job"
 	"ideploy/internal/platform/database"
 	"ideploy/internal/platform/instance"
@@ -304,6 +305,8 @@ type ProjectInput struct {
 	SourceKind      string `json:"sourceKind"`
 	LocalPath       string `json:"localPath"`
 	RepositoryURL   string `json:"repositoryUrl"`
+	GitUsername     string `json:"gitUsername"`
+	GitToken        string `json:"gitToken"`
 	RefKind         string `json:"refKind"`
 	RefValue        string `json:"refValue"`
 	ContextPath     string `json:"contextPath"`
@@ -313,27 +316,29 @@ type ProjectInput struct {
 }
 
 type ProjectView struct {
-	ID              string `json:"id"`
-	Name            string `json:"name"`
-	Description     string `json:"description"`
-	SourceKind      string `json:"sourceKind"`
-	LocalPath       string `json:"localPath"`
-	RepositoryURL   string `json:"repositoryUrl"`
-	RefKind         string `json:"refKind"`
-	RefValue        string `json:"refValue"`
-	ResolvedCommit  string `json:"resolvedCommit"`
-	Status          string `json:"status"`
-	LastCheckedAt   string `json:"lastCheckedAt"`
-	LastError       string `json:"lastError"`
-	ContextPath     string `json:"contextPath"`
-	DockerfilePath  string `json:"dockerfilePath"`
-	ComposePath     string `json:"composePath"`
-	ImageRepository string `json:"imageRepository"`
-	CreatedAt       string `json:"createdAt"`
-	UpdatedAt       string `json:"updatedAt"`
+	ID                      string `json:"id"`
+	Name                    string `json:"name"`
+	Description             string `json:"description"`
+	SourceKind              string `json:"sourceKind"`
+	LocalPath               string `json:"localPath"`
+	RepositoryURL           string `json:"repositoryUrl"`
+	GitCredentialConfigured bool   `json:"gitCredentialConfigured"`
+	RefKind                 string `json:"refKind"`
+	RefValue                string `json:"refValue"`
+	ResolvedCommit          string `json:"resolvedCommit"`
+	Status                  string `json:"status"`
+	LastCheckedAt           string `json:"lastCheckedAt"`
+	LastError               string `json:"lastError"`
+	ContextPath             string `json:"contextPath"`
+	DockerfilePath          string `json:"dockerfilePath"`
+	ComposePath             string `json:"composePath"`
+	ImageRepository         string `json:"imageRepository"`
+	CreatedAt               string `json:"createdAt"`
+	UpdatedAt               string `json:"updatedAt"`
 }
 
 type DeploymentInput struct {
+	BuildMode      string   `json:"buildMode"`
 	WorkloadKind   string   `json:"workloadKind"`
 	WorkloadName   string   `json:"workloadName"`
 	ProjectID      string   `json:"projectId"`
@@ -361,6 +366,12 @@ type DeploymentVersionSuggestionView struct {
 }
 
 type DeploymentReleaseView struct {
+	BuildMode           string `json:"buildMode"`
+	SourceCommit        string `json:"sourceCommit"`
+	DeliveryRef         string `json:"deliveryRef"`
+	DeliveryCommit      string `json:"deliveryCommit"`
+	DeliveryDigest      string `json:"deliveryDigest"`
+	RemoteJobID         string `json:"remoteJobId"`
 	ArtifactPinned      bool   `json:"artifactPinned"`
 	ID                  string `json:"id"`
 	DeploymentID        string `json:"deploymentId"`
@@ -382,6 +393,7 @@ type DeploymentReleaseView struct {
 // deliberately not persisted here: the desktop queries Docker when rendering
 // the deployment page so an old local record is never presented as live.
 type DeploymentView struct {
+	BuildMode                  string   `json:"buildMode"`
 	WorkloadKind               string   `json:"workloadKind"`
 	WorkloadName               string   `json:"workloadName"`
 	ID                         string   `json:"id"`
@@ -412,23 +424,26 @@ type SystemService struct {
 	preflightProgress map[string]preflightProgressEntry
 	vaultKey          []byte
 
-	db             *sql.DB
-	store          *job.Store
-	registries     *registry.Store
-	databases      *databasebrowser.Store
-	servers        *server.Store
-	projects       *project.Store
-	deployments    *deployment.Store
-	runner         *job.Runner
-	runtimeLock    *instance.Lock
-	controlServer  *cliControlServer
-	paths          appPaths.AppPaths
-	recoveredJobs  int64
-	emit           func(JobView)
-	emitRegistry   func(RegistryView)
-	emitServer     func(ServerView)
-	emitProject    func(ProjectView)
-	emitDeployment func(DeploymentView)
+	db                   *sql.DB
+	store                *job.Store
+	registries           *registry.Store
+	databases            *databasebrowser.Store
+	servers              *server.Store
+	projects             *project.Store
+	deployments          *deployment.Store
+	runner               *job.Runner
+	remoteRecoveryCancel context.CancelFunc
+	remoteRecoveryDone   chan struct{}
+	closeMu              sync.Mutex
+	runtimeLock          *instance.Lock
+	controlServer        *cliControlServer
+	paths                appPaths.AppPaths
+	recoveredJobs        int64
+	emit                 func(JobView)
+	emitRegistry         func(RegistryView)
+	emitServer           func(ServerView)
+	emitProject          func(ProjectView)
+	emitDeployment       func(DeploymentView)
 }
 
 func NewSystemService() *SystemService {
@@ -517,6 +532,11 @@ func (s *SystemService) startWithPaths(ctx context.Context, serveControl bool, p
 	servers := server.NewStore(db)
 	projects := project.NewStore(db)
 	deployments := deployment.NewStore(db)
+	if err := deployments.MigrateLegacyManifests(ctx); err != nil {
+		db.Close()
+		_ = runtimeLock.Release()
+		return err
+	}
 	recovered, err := store.RecoverInterrupted(ctx)
 	if err != nil {
 		db.Close()
@@ -596,6 +616,7 @@ func (s *SystemService) startWithPaths(ctx context.Context, serveControl bool, p
 		s.mu.Lock()
 		s.controlServer = controlServer
 		s.mu.Unlock()
+		s.startRemoteReleaseRecovery(ctx)
 	}
 	return nil
 }
@@ -1080,6 +1101,9 @@ func (s *SystemService) ListProjects() ([]ProjectView, error) {
 }
 
 func (s *SystemService) CreateProject(input ProjectInput) (ProjectView, error) {
+	if err := validateProjectGitCredentialInput(input); err != nil {
+		return ProjectView{}, err
+	}
 	projects, err := s.projectStore()
 	if err != nil {
 		return ProjectView{}, err
@@ -1099,12 +1123,25 @@ func (s *SystemService) CreateProject(input ProjectInput) (ProjectView, error) {
 	if err != nil {
 		return ProjectView{}, err
 	}
+	if input.GitToken != "" {
+		if err := s.saveProjectGitCredential(ctx, projects, created.ID, input); err != nil {
+			_ = projects.Delete(ctx, created.ID)
+			return ProjectView{}, err
+		}
+		created, err = projects.Get(ctx, created.ID)
+		if err != nil {
+			return ProjectView{}, err
+		}
+	}
 	view := toProjectView(created)
 	s.emitProjectView(view)
 	return view, nil
 }
 
 func (s *SystemService) UpdateProject(id string, input ProjectInput) (ProjectView, error) {
+	if err := validateProjectGitCredentialInput(input); err != nil {
+		return ProjectView{}, err
+	}
 	projects, err := s.projectStore()
 	if err != nil {
 		return ProjectView{}, err
@@ -1120,9 +1157,25 @@ func (s *SystemService) UpdateProject(id string, input ProjectInput) (ProjectVie
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	previous, err := projects.Get(ctx, id)
+	if err != nil {
+		return ProjectView{}, err
+	}
 	updated, err := projects.Update(ctx, id, value, inspection)
 	if err != nil {
 		return ProjectView{}, err
+	}
+	if input.GitToken != "" {
+		if err := s.saveProjectGitCredential(ctx, projects, id, input); err != nil {
+			return ProjectView{}, err
+		}
+		updated, err = projects.Get(ctx, id)
+		if err != nil {
+			return ProjectView{}, err
+		}
+	}
+	if previous.CredentialRef != "" && updated.CredentialRef == "" {
+		_ = gitauth.Delete(ctx, previous.CredentialRef)
 	}
 	view := toProjectView(updated)
 	s.emitProjectView(view)
@@ -1181,6 +1234,10 @@ func (s *SystemService) DeleteProject(id string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	current, err := projects.Get(ctx, id)
+	if err != nil {
+		return err
+	}
 	deployments, err := s.deploymentStore()
 	if err != nil {
 		return err
@@ -1193,6 +1250,9 @@ func (s *SystemService) DeleteProject(id string) error {
 		return err
 	}
 	cleanupEnvironmentSecrets(ctx, refs)
+	if current.CredentialRef != "" {
+		_ = gitauth.Delete(ctx, current.CredentialRef)
+	}
 	return nil
 }
 
@@ -1251,6 +1311,7 @@ func (s *SystemService) CreateDeployment(input DeploymentInput) (DeploymentView,
 		return DeploymentView{}, err
 	}
 	target, err := deployments.Create(ctx, deployment.Input{
+		BuildMode: deployment.BuildMode(input.BuildMode),
 		ProjectID: input.ProjectID, ServerID: input.ServerID, WorkloadKind: input.WorkloadKind,
 		WorkloadName: input.WorkloadName, ContainerPorts: input.ContainerPorts, RestartPolicy: input.RestartPolicy,
 	})
@@ -2017,6 +2078,20 @@ func (s *SystemService) ServiceShutdown() error {
 }
 
 func (s *SystemService) close() error {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	s.mu.Lock()
+	recoveryCancel := s.remoteRecoveryCancel
+	recoveryDone := s.remoteRecoveryDone
+	s.remoteRecoveryCancel = nil
+	s.remoteRecoveryDone = nil
+	s.mu.Unlock()
+	if recoveryCancel != nil {
+		recoveryCancel()
+	}
+	if recoveryDone != nil {
+		<-recoveryDone
+	}
 	s.mu.Lock()
 	controlServer := s.controlServer
 	runner := s.runner
@@ -2024,6 +2099,18 @@ func (s *SystemService) close() error {
 	runtimeLock := s.runtimeLock
 	s.controlServer = nil
 	s.runner = nil
+	s.mu.Unlock()
+
+	if controlServer != nil {
+		_ = controlServer.Close()
+	}
+	// Release handlers can still need the stores and shared connection to
+	// record an interruption or restore a workload while the runner drains.
+	if runner != nil {
+		runner.Stop()
+	}
+
+	s.mu.Lock()
 	s.db = nil
 	s.runtimeLock = nil
 	s.store = nil
@@ -2033,13 +2120,6 @@ func (s *SystemService) close() error {
 	s.projects = nil
 	s.deployments = nil
 	s.mu.Unlock()
-
-	if controlServer != nil {
-		_ = controlServer.Close()
-	}
-	if runner != nil {
-		runner.Stop()
-	}
 	var closeErr error
 	if db != nil {
 		closeErr = db.Close()
@@ -2582,7 +2662,8 @@ func toProjectView(value project.Project) ProjectView {
 	return ProjectView{
 		ID: value.ID, Name: value.Name, Description: value.Description, SourceKind: string(value.SourceKind),
 		LocalPath: value.LocalPath, RepositoryURL: value.RepositoryURL, RefKind: string(value.RefKind),
-		RefValue: value.RefValue, ResolvedCommit: value.ResolvedCommit, Status: string(value.Status),
+		GitCredentialConfigured: value.CredentialRef != "",
+		RefValue:                value.RefValue, ResolvedCommit: value.ResolvedCommit, Status: string(value.Status),
 		LastCheckedAt: lastCheckedAt, LastError: value.LastError, ContextPath: value.ContextPath,
 		DockerfilePath: value.DockerfilePath, ComposePath: value.ComposePath, ImageRepository: value.ImageRepository,
 		CreatedAt: value.CreatedAt.Format(time.RFC3339), UpdatedAt: value.UpdatedAt.Format(time.RFC3339),
@@ -2599,6 +2680,7 @@ func deploymentViewFor(ctx context.Context, projects *project.Store, servers *se
 		return DeploymentView{}, err
 	}
 	return DeploymentView{
+		BuildMode:    string(target.BuildMode),
 		WorkloadKind: target.WorkloadKind, WorkloadName: target.WorkloadName,
 		ID: target.ID, ProjectID: workspaceProject.ID, ProjectName: workspaceProject.Name,
 		ProjectStatus: string(workspaceProject.Status), ImageRepository: workspaceProject.ImageRepository,
@@ -2617,6 +2699,9 @@ func toDeploymentReleaseView(value deployment.Release) DeploymentReleaseView {
 		finishedAt = value.FinishedAt.Format(time.RFC3339)
 	}
 	return DeploymentReleaseView{
+		BuildMode: string(value.BuildMode), SourceCommit: value.SourceCommit,
+		DeliveryRef: value.DeliveryRef, DeliveryCommit: value.DeliveryCommit,
+		DeliveryDigest: value.DeliveryDigest, RemoteJobID: value.RemoteJobID,
 		ArtifactPinned: validateRollbackArtifact(value.ImageRef, value.Manifest) == nil,
 		ID:             value.ID, DeploymentID: value.DeploymentID, RegistryID: value.RegistryID, JobID: value.JobID,
 		Action: value.Action, Version: value.Version, ImageRef: value.ImageRef,

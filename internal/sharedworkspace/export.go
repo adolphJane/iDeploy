@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+
+	"ideploy/internal/deployment"
 )
 
 type Record struct {
@@ -45,7 +47,7 @@ var extraColumns = map[string][]string{
 	"registry_connections":             {"credential_ref"},
 	"database_connections":             {"credential_ref"},
 	"deployment_environment_variables": {"plain_value", "credential_ref"},
-	"deployment_releases":              {"manifest"},
+	"deployment_releases":              {"manifest", "manifest_envelope"},
 	"dns_connections":                  {"access_key_id", "credential_ref"},
 }
 
@@ -89,9 +91,17 @@ func Export(ctx context.Context, db *sql.DB) (Snapshot, error) {
 				if path := extra["local_path"]; path != "" {
 					result.Preview.LocalPaths = append(result.Preview.LocalPaths, "项目 "+id+" 的源码目录需在其他设备重新选择")
 				}
-				if extra["credential_ref"] != "" {
-					result.Preview.Blockers = append(result.Preview.Blockers, "项目 "+id+" 的 Git 凭据暂无法识别，须先调整连接")
+				if ref := extra["credential_ref"]; ref != "" && ref != "keychain:git-project:"+id {
+					result.Preview.Blockers = append(result.Preview.Blockers, "项目 "+id+" 的 Git 凭据引用无法识别")
 				}
+			}
+			if spec.Table == "deployment_releases" && extra["manifest_envelope"] != "" {
+				manifest, err := deployment.OpenManifestEnvelope(ctx, extra["manifest_envelope"])
+				if err != nil {
+					rows.Close()
+					return Snapshot{}, fmt.Errorf("读取加密发布快照: %w", err)
+				}
+				extra["manifest"] = manifest
 			}
 			if spec.Table == "servers" && extra["private_key_path"] != "" {
 				result.Preview.LocalPaths = append(result.Preview.LocalPaths, "服务器 "+id+" 的 SSH 私钥需在其他设备重新选择")
@@ -109,7 +119,7 @@ func Export(ctx context.Context, db *sql.DB) (Snapshot, error) {
 					result.Secrets = append(result.Secrets, PortableSecret{ID: spec.Kind + ":" + id + ":" + field, Value: value})
 				}
 			}
-			if ref := extra["credential_ref"]; ref != "" && spec.Table != "project_sources" {
+			if ref := extra["credential_ref"]; ref != "" {
 				result.Secrets = append(result.Secrets, PortableSecret{ID: spec.Kind + ":" + id + ":credential", Ref: ref})
 			}
 			encoded, err := json.Marshal(data)

@@ -155,6 +155,26 @@ func (s *SystemService) PreflightDeployment(input DeploymentPreflightInput) (Dep
 			view.OK = false
 		}
 	}
+	if target.BuildMode == deployment.BuildRemote {
+		if projectValue.SourceKind != project.SourceGit || target.WorkloadKind == "compose" && projectValue.ComposePath == "" {
+			add("remote_source", "failed", "远端构建需要 Git 来源，Compose 部署还需要配置 Compose 文件")
+		} else {
+			add("remote_source", "ok", "远端构建将使用 Git 固定提交")
+		}
+		workspace, workspaceErr := s.GetSharedWorkspaceStatus()
+		if workspaceErr != nil || workspace.Mode != "shared" {
+			add("remote_service", "failed", "请先连接 iDeploy 服务并启用共享工作区")
+		} else {
+			serviceState, stateErr := s.GetSharedServerStatus(workspace.ServerID)
+			if stateErr != nil || !serviceState.Healthy || !serviceState.WorkerRunning {
+				add("remote_service", "failed", "iDeploy 服务或构建执行器未就绪")
+			} else if err := s.checkRemoteBuildWorker(ctx, workspace.ServerID, target.WorkloadKind == "compose"); err != nil {
+				add("remote_service", "failed", err.Error())
+			} else {
+				add("remote_service", "ok", "iDeploy 服务与构建工具已就绪")
+			}
+		}
+	}
 	if input.FQDN == "" || input.PathPrefix == "" || input.ContainerPort < 1 || input.ContainerPort > 65535 {
 		add("internal_ingress", "failed", "请选择入口域名、单级项目路径和应用容器端口")
 		return view, nil
@@ -205,9 +225,9 @@ func (s *SystemService) PreflightDeployment(input DeploymentPreflightInput) (Dep
 	}
 
 	setStage(2, "正在检查发布仓库和构建代理")
-	if registryValue.Status != registry.StatusHealthy {
+	if target.BuildMode != deployment.BuildRemote && registryValue.Status != registry.StatusHealthy {
 		add("registry_push", "failed", "发布仓库尚未通过登录测试")
-	} else if _, credentialErr := loadRegistryPushPassword(ctx, registryValue); credentialErr != nil {
+	} else if _, credentialErr := s.registryPasswordForRelease(ctx, registryValue, target.BuildMode == deployment.BuildRemote); credentialErr != nil {
 		add("registry_push", "failed", credentialErr.Error())
 	} else {
 		add("registry_push", "ok", "发布仓库连接及推送凭据可用")
@@ -218,7 +238,9 @@ func (s *SystemService) PreflightDeployment(input DeploymentPreflightInput) (Dep
 	if proxyErr == nil {
 		proxySettings, proxyErr = loadBuildProxySettings(ctx, db)
 	}
-	if proxyErr != nil {
+	if target.BuildMode == deployment.BuildRemote {
+		add("build_proxy", "warning", "远端构建当前使用服务端 Docker 默认网络")
+	} else if proxyErr != nil {
 		add("build_proxy", "failed", proxyErr.Error())
 	} else if proxySettings.Mode == "disabled" {
 		add("build_proxy", "warning", "构建代理未启用，基础镜像将使用 Docker 默认网络")
@@ -227,7 +249,9 @@ func (s *SystemService) PreflightDeployment(input DeploymentPreflightInput) (Dep
 	}
 
 	setStage(3, fmt.Sprintf("正在检查基础镜像（0/%d）", len(view.BaseImages)))
-	if len(view.BaseImages) > 0 {
+	if target.BuildMode == deployment.BuildRemote {
+		add("base_images", "warning", "基础镜像由远端构建执行器在构建时拉取")
+	} else if len(view.BaseImages) > 0 {
 		docker, dockerErr := toolchain.ResolveExecutable(ctx, "docker")
 		if dockerErr != nil {
 			add("base_images", "failed", dockerErr.Error())
@@ -276,8 +300,8 @@ func (s *SystemService) PreflightDeployment(input DeploymentPreflightInput) (Dep
 		}
 	}
 
-	setStage(4, "正在检查运行环境变量")
-	if target.WorkloadKind == "container" {
+	setStage(4, "正在检查环境变量和构建秘密")
+	if target.WorkloadKind == "container" || target.WorkloadKind == "compose" && target.BuildMode == deployment.BuildRemote {
 		environmentVariables, environmentErr := deployments.ListEnvironment(ctx, target.ID)
 		if environmentErr != nil {
 			add("environment", "failed", environmentErr.Error())
@@ -293,6 +317,8 @@ func (s *SystemService) PreflightDeployment(input DeploymentPreflightInput) (Dep
 			}
 			if len(missing) > 0 {
 				add("environment", "failed", "以下秘密变量未配置或不可用: "+strings.Join(missing, "、"))
+			} else if target.WorkloadKind == "compose" {
+				add("environment", "ok", fmt.Sprintf("%d 个 Compose 构建秘密可用", len(environmentVariables)))
 			} else if len(environmentVariables) == 0 {
 				add("environment", "warning", "尚未配置运行环境变量；如应用依赖数据库，请先补充")
 			} else {

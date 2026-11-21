@@ -125,7 +125,7 @@ struct ContentView: View {
                         .frame(width: 8, height: 8)
                         .shadow(color: model.ready ? DeployStyle.greenBright.opacity(0.8) : .clear, radius: 5)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(!model.ready ? "正在连接" : model.sharedSyncError.isEmpty ? "后台服务已连接" : "共享同步需处理")
+                        Text(!model.ready ? "正在连接" : model.sharedSyncInProgress ? "正在检查共享工作区" : model.sharedSyncError.isEmpty ? "后台服务已连接" : "共享同步需处理")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(Color.white.opacity(0.81))
                         Text(model.sharedMode == "shared" ? "共享工作空间" : "本机工作空间")

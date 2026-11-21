@@ -18,7 +18,6 @@ struct ProjectsPage: View {
     @State private var formRequest: ProjectFormRequest?
     @State private var showingGenerator = false
     @State private var fileRequest: ProjectFileRequest?
-    @State private var gitStatus = J(nil)
     @State private var deleteTarget: J?
 
     private var selected: J? { model.projects.first { $0.id == selectedID } }
@@ -98,10 +97,6 @@ struct ProjectsPage: View {
                         }
                         .buttonStyle(DeploySecondaryButtonStyle())
                         .disabled(project["sourceKind"].string != "local")
-                        Button("Git 状态") {
-                            Task { gitStatus = await model.perform("ProjectGitStatus", [project.id, true], refreshAfter: false) ?? J(nil) }
-                        }
-                        .buttonStyle(DeploySecondaryButtonStyle())
                         Button("生成 Dockerfile") { showingGenerator = true }
                             .buttonStyle(DeploySecondaryButtonStyle())
                             .disabled(project["sourceKind"].string != "local")
@@ -115,6 +110,9 @@ struct ProjectsPage: View {
                             ProjectDetailRow(key: "引用", value: "\(project["refKind"].string) \(project["refValue"].string)")
                         }
                     }
+                    ProjectGitSummaryCard(projectID: project.id, hasLocalWorktree: project["sourceKind"].string == "local")
+                        .id([project.id, project["sourceKind"].string, project["localPath"].string,
+                             project["repositoryUrl"].string, project["refKind"].string, project["refValue"].string])
                     ProjectDetailCard(title: "构建配置") {
                         ProjectDetailRow(key: "上下文", value: project["contextPath"].string)
                         ProjectFileRow(title: "Dockerfile", path: project["dockerfilePath"].string,
@@ -126,14 +124,6 @@ struct ProjectsPage: View {
                             fileRequest = ProjectFileRequest(project: project, kind: "compose")
                         }
                         ProjectDetailRow(key: "镜像仓库", value: project["imageRepository"].string)
-                    }
-                    if !gitStatus.isNull {
-                        ProjectDetailCard(title: "Git 状态") {
-                            ProjectDetailRow(key: "分支", value: gitStatus["branch"].string)
-                            ProjectDetailRow(key: "提交", value: gitStatus["head"].string)
-                            ProjectDetailRow(key: "未提交文件", value: gitStatus["changedFiles"].string)
-                            ProjectDetailRow(key: "落后远端", value: gitStatus["behind"].string)
-                        }
                     }
                     if !project["lastError"].string.isEmpty {
                         Label(project["lastError"].string, systemImage: "exclamationmark.triangle")
@@ -164,7 +154,6 @@ struct ProjectsPage: View {
                 .environmentObject(model)
                 .id(request.id)
         }
-        .onChange(of: selectedID) { _ in gitStatus = J(nil) }
         .sheet(isPresented: $showingGenerator) {
             if let selected {
                 DockerfileGeneratorView(project: selected)
@@ -195,6 +184,67 @@ struct ProjectsPage: View {
     }
 }
 
+private struct ProjectGitSummaryCard: View {
+    let projectID: String
+    let hasLocalWorktree: Bool
+    @State private var summary = J(nil)
+    @State private var loading = true
+    @State private var error = ""
+    @State private var refreshID = UUID()
+
+    private var syncStatus: String {
+        guard hasLocalWorktree else { return "此项目仅配置了远端仓库，无本地工作区可比较" }
+        var changes: [String] = []
+        let working = summary["workingChanges"].int
+        if working > 0 { changes.append("\(working) 个未提交文件") }
+        if summary["syncKnown"].bool {
+            let ahead = summary["ahead"].int
+            let behind = summary["behind"].int
+            if ahead > 0 { changes.append("\(ahead) 个本地提交待推送") }
+            if behind > 0 { changes.append("\(behind) 个远端提交待拉取") }
+            return changes.isEmpty ? "已同步" : changes.joined(separator: " · ")
+        }
+        changes.append("无法确认与远端的同步状态")
+        return changes.joined(separator: " · ")
+    }
+
+    var body: some View {
+        ProjectDetailCard(title: "Git 仓库") {
+            if loading {
+                ProgressView().controlSize(.small).accessibilityLabel("正在检查 Git 状态")
+            }
+            Button("刷新 Git 状态") { refreshID = UUID() }
+                .buttonStyle(DeploySecondaryButtonStyle())
+                .disabled(loading)
+        } content: {
+            if !summary.isNull {
+                let ref = summary["ref"].string
+                let updated = summary["updatedAt"].string
+                ProjectDetailRow(key: "仓库地址", value: summary["repositoryUrl"].string)
+                ProjectDetailRow(key: ref.hasPrefix("refs/tags/") ? "标签" : "分支 / 引用",
+                                 value: ref.replacingOccurrences(of: "^refs/(heads|tags)/", with: "", options: .regularExpression))
+                ProjectDetailRow(key: "远端最新提交时间", value: updated.isEmpty ? "未获取" : SharedSyncDateText.localDateTime(updated))
+                ProjectDetailRow(key: "同步状态", value: syncStatus)
+            }
+            if !error.isEmpty { Text(error).foregroundStyle(DeployStyle.muted) }
+        }
+        .task(id: refreshID) {
+            loading = true
+            do {
+                let result = try await NativeBridge.call("GetProjectGitSummary", [projectID], timeoutSeconds: 45)
+                guard !Task.isCancelled else { return }
+                summary = result
+                error = result["detail"].string
+            } catch {
+                guard !Task.isCancelled else { return }
+                summary = J(nil)
+                self.error = error.localizedDescription
+            }
+            loading = false
+        }
+    }
+}
+
 private struct ProjectFileRow: View {
     let title: String
     let path: String
@@ -219,20 +269,37 @@ private struct ProjectFileRow: View {
     }
 }
 
-private struct ProjectDetailCard<Content: View>: View {
+private struct ProjectDetailCard<HeaderActions: View, Content: View>: View {
     let title: String
-    @ViewBuilder let content: Content
+    let headerActions: HeaderActions
+    let content: Content
+
+    init(title: String, @ViewBuilder headerActions: () -> HeaderActions, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.headerActions = headerActions()
+        self.content = content()
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(DeployStyle.ink)
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(DeployStyle.ink)
+                Spacer(minLength: 8)
+                headerActions
+            }
             content
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
         .deployCard(fill: DeployStyle.overviewPanel)
+    }
+}
+
+private extension ProjectDetailCard where HeaderActions == EmptyView {
+    init(title: String, @ViewBuilder content: () -> Content) {
+        self.init(title: title, headerActions: { EmptyView() }, content: content)
     }
 }
 
@@ -264,6 +331,8 @@ struct ProjectFormView: View {
     @State private var sourceKind: String
     @State private var localPath: String
     @State private var repositoryURL: String
+    @State private var gitUsername: String
+    @State private var gitToken: String
     @State private var refKind: String
     @State private var refValue: String
     @State private var contextPath: String
@@ -278,6 +347,8 @@ struct ProjectFormView: View {
         _sourceKind = State(initialValue: project?["sourceKind"].string ?? "local")
         _localPath = State(initialValue: project?["localPath"].string ?? "")
         _repositoryURL = State(initialValue: project?["repositoryUrl"].string ?? "")
+        _gitUsername = State(initialValue: "")
+        _gitToken = State(initialValue: "")
         _refKind = State(initialValue: project?["refKind"].string ?? "branch")
         _refValue = State(initialValue: project?["refValue"].string ?? "main")
         _contextPath = State(initialValue: project?["contextPath"].string ?? ".")
@@ -361,6 +432,17 @@ struct ProjectFormView: View {
                                 TextField("输入 HTTPS 或 SSH 仓库地址", text: $repositoryURL)
                                     .textFieldStyle(.roundedBorder)
                             }
+                            VStack(alignment: .leading, spacing: 7) {
+                                Text("HTTPS Git 用户名与令牌（可选）").font(.system(size: 12, weight: .semibold)).foregroundStyle(DeployStyle.ink)
+                                HStack(spacing: 12) {
+                                    TextField("用户名", text: $gitUsername).textFieldStyle(.roundedBorder)
+                                    SecureField("访问令牌，留空保留已有凭据", text: $gitToken).textFieldStyle(.roundedBorder)
+                                }
+                                if project?["gitCredentialConfigured"].bool == true {
+                                    Text("已保存凭据；留空令牌将继续使用原凭据。")
+                                        .font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
+                                }
+                            }
                             HStack(alignment: .top, spacing: 16) {
                                 VStack(alignment: .leading, spacing: 7) {
                                     Text("引用类型").font(.system(size: 12, weight: .semibold)).foregroundStyle(DeployStyle.ink)
@@ -434,6 +516,7 @@ struct ProjectFormView: View {
                         let input: [String: Any] = [
                             "name": name, "description": description, "sourceKind": sourceKind,
                             "localPath": localPath, "repositoryUrl": repositoryURL,
+                            "gitUsername": gitUsername, "gitToken": gitToken,
                             "refKind": refKind, "refValue": refValue, "contextPath": contextPath,
                             "dockerfilePath": dockerfilePath, "composePath": composePath,
                             "imageRepository": imageRepository
@@ -454,7 +537,7 @@ struct ProjectFormView: View {
             .padding(.vertical, 16)
             .background(DeployStyle.overviewPanel)
         }
-        .frame(width: 650, height: sourceKind == "git" ? 760 : 750)
+        .frame(width: 650, height: sourceKind == "git" ? 810 : 750)
         .environment(\.colorScheme, .light)
     }
 }

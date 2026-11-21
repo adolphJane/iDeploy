@@ -38,6 +38,7 @@ done
 
 mkdir -p bin/native-build/agents
 mkdir -p bin/native-build/shared-server
+mkdir -p bin/native-build/workers
 for agent_arch in amd64 arm64; do
   CGO_ENABLED=0 GOOS=linux GOARCH="$agent_arch" \
     go build -trimpath -buildvcs=false -ldflags="-w -s" \
@@ -45,6 +46,9 @@ for agent_arch in amd64 arm64; do
   CGO_ENABLED=0 GOOS=linux GOARCH="$agent_arch" \
     go build -trimpath -buildvcs=false -ldflags="-w -s" \
       -o "bin/native-build/shared-server/ideploy-server-linux-$agent_arch" ./cmd/ideploy-server
+  CGO_ENABLED=0 GOOS=linux GOARCH="$agent_arch" \
+    go build -trimpath -buildvcs=false -ldflags="-w -s" \
+      -o "bin/native-build/workers/ideploy-worker-linux-$agent_arch" ./cmd/ideploy-worker
 done
 
 if [[ "$mode" == build ]]; then
@@ -69,6 +73,8 @@ mkdir -p "$app/Contents/Resources/agents"
 cp bin/native-build/agents/ideploy-agent-linux-* "$app/Contents/Resources/agents/"
 mkdir -p "$app/Contents/Resources/shared-server"
 cp bin/native-build/shared-server/ideploy-server-linux-* "$app/Contents/Resources/shared-server/"
+mkdir -p "$app/Contents/Resources/workers"
+cp bin/native-build/workers/ideploy-worker-linux-* "$app/Contents/Resources/workers/"
 cp build/darwin/Info.plist "$app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable iDeployUI' "$app/Contents/Info.plist"
 xcrun actool --compile "$app/Contents/Resources" --platform macosx \

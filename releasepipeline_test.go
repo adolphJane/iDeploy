@@ -1,14 +1,63 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"ideploy/internal/project"
 	"ideploy/internal/registry"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestPrepareReleaseSourceResolvesConfiguredGitRef(t *testing.T) {
+	root := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	git("init", "-b", "main")
+	git("config", "user.name", "Test")
+	git("config", "user.email", "test@example.test")
+	git("commit", "--allow-empty", "-m", "tagged")
+	tagCommit := git("rev-parse", "HEAD")
+	git("tag", "compose")
+	git("switch", "-c", "compose")
+	git("commit", "--allow-empty", "-m", "branch tip")
+	branchCommit := git("rev-parse", "HEAD")
+	git("switch", "main")
+	for _, test := range []struct {
+		kind project.RefKind
+		ref  string
+		want string
+	}{
+		{project.RefBranch, "compose", branchCommit},
+		{project.RefBranch, "refs/heads/compose", branchCommit},
+		{project.RefTag, "compose", tagCommit},
+		{project.RefCommit, branchCommit, branchCommit},
+	} {
+		t.Run(string(test.kind)+"/"+test.ref, func(t *testing.T) {
+			source, err := prepareReleaseSource(context.Background(), project.Project{
+				SourceKind: project.SourceGit, RepositoryURL: root, RefKind: test.kind, RefValue: test.ref,
+			}, t.TempDir(), discardJobReporter{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer source.cleanup()
+			if source.revision != test.want {
+				t.Fatalf("got commit %s, want %s", source.revision, test.want)
+			}
+		})
+	}
+}
 
 func TestBuildArgumentsSelectManagedBuilderAndLoadImage(t *testing.T) {
 	proxy := buildProxyRuntime{BuilderName: "ideploy-proxy-test"}

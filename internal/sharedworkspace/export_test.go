@@ -60,6 +60,72 @@ func TestExportAndMaterializeKeepDevicePathsLocal(t *testing.T) {
 	}
 }
 
+func TestExportGitCredentialAsSecretReference(t *testing.T) {
+	ctx := context.Background()
+	db, err := database.Open(ctx, filepath.Join(t.TempDir(), "source.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, `INSERT INTO projects(id,name,created_at,updated_at) VALUES('p1','Private','2026-01-01','2026-01-01')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO project_sources(project_id,kind,repository_url,credential_ref) VALUES('p1','git','https://example.com/private.git','keychain:git-project:p1')`); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := sharedworkspace.Export(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Preview.Blockers) != 0 || len(snapshot.Secrets) != 1 || snapshot.Secrets[0].ID != "r.project_sources:p1:credential" {
+		t.Fatalf("unexpected export: %#v", snapshot.Preview)
+	}
+	for _, record := range snapshot.Records {
+		if strings.Contains(string(record.Data), "keychain:") {
+			t.Fatalf("credential reference leaked in resource: %s", record.Data)
+		}
+	}
+}
+
+func TestExportBuildSecretMetadataWithoutValue(t *testing.T) {
+	ctx := context.Background()
+	db, err := database.Open(ctx, filepath.Join(t.TempDir(), "source.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, statement := range []string{
+		`INSERT INTO projects(id,name,created_at,updated_at) VALUES('p1','API','2026-01-01','2026-01-01')`,
+		`INSERT INTO servers(id,name,host,port,ssh_user,created_at,updated_at) VALUES('s1','Server','example.com',22,'root','2026-01-01','2026-01-01')`,
+		`INSERT INTO deployment_targets(id,project_id,server_id,environment_revision,created_at,updated_at) VALUES('d1','p1','s1',4,'2026-01-01','2026-01-01')`,
+		`INSERT INTO deployment_environment_variables(id,deployment_id,name,kind,credential_ref,build_secret,created_at,updated_at) VALUES('v1','d1','PACKAGE_TOKEN','secret','keychain:deployment-environment:v1',1,'2026-01-01','2026-01-01')`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := sharedworkspace.Export(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Secrets) != 1 || snapshot.Secrets[0].ID != "r.env:v1:credential" {
+		t.Fatalf("secret export: %#v", snapshot.Secrets)
+	}
+	var found bool
+	for _, record := range snapshot.Records {
+		if record.Kind != "r.env" {
+			continue
+		}
+		found = true
+		if !strings.Contains(string(record.Data), `"build_secret":1`) || strings.Contains(string(record.Data), "keychain:") {
+			t.Fatalf("metadata leaked or missing: %s", record.Data)
+		}
+	}
+	if !found {
+		t.Fatal("environment metadata missing")
+	}
+}
+
 func TestInternalIngressAndPublishIntentSurviveSharedMaterialization(t *testing.T) {
 	ctx := context.Background()
 	source, err := database.Open(ctx, filepath.Join(t.TempDir(), "source.db"))

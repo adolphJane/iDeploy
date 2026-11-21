@@ -16,8 +16,16 @@ import (
 )
 
 const sharedServerContainer = "ideploy-shared-server"
+const buildWorkerContainer = "ideploy-build-worker"
 
 type SharedServerState struct {
+	DockerInstalled bool   `json:"dockerInstalled"`
+	DockerReady     bool   `json:"dockerReady"`
+	DockerDetail    string `json:"dockerDetail"`
+	WorkerInstalled bool   `json:"workerInstalled"`
+	WorkerRunning   bool   `json:"workerRunning"`
+	WorkerImageTag  string `json:"workerImageTag"`
+	LatestWorkerTag string `json:"latestWorkerTag"`
 	Installed       bool   `json:"installed"`
 	Running         bool   `json:"running"`
 	Healthy         bool   `json:"healthy"`
@@ -53,11 +61,41 @@ func bundledSharedServerPath(arch string) (string, error) {
 	return path, nil
 }
 
+func bundledBuildWorkerPath(arch string) (string, error) {
+	if arch != "amd64" && arch != "arm64" {
+		return "", errors.New("构建执行器仅支持 Linux amd64 和 arm64")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(filepath.Dir(executable), "..", "Resources", "workers", "ideploy-worker-linux-"+arch)
+	if _, err := os.Stat(path); err != nil {
+		return "", fmt.Errorf("应用包缺少 Linux %s 构建执行器: %w", arch, err)
+	}
+	return path, nil
+}
+
 func (r *Remote) PreflightSharedServer(ctx context.Context, connection Connection) (SharedServerState, error) {
+	state := SharedServerState{}
+	installed, err := r.runTimeout(ctx, connection, "if command -v docker >/dev/null 2>&1; then echo PRESENT; else echo ABSENT; fi", 10*time.Second)
+	if err != nil {
+		return SharedServerState{}, fmt.Errorf("连接服务器检查 Docker: %w", err)
+	}
+	if strings.TrimSpace(installed) != "PRESENT" {
+		state.DockerDetail = "服务器未安装 Docker CLI，无法安装 iDeploy 服务或执行远端构建"
+		state.Detail = state.DockerDetail
+		return state, nil
+	}
+	state.DockerInstalled = true
 	output, err := r.runTimeout(ctx, connection, "set -e; uname -s; uname -m; docker info --format '{{.OSType}}/{{.Architecture}}'", 25*time.Second)
 	if err != nil {
-		return SharedServerState{}, fmt.Errorf("检查服务器 Docker: %w", err)
+		state.DockerDetail = "Docker 已安装，但 daemon 不可用或当前用户无权访问：" + err.Error()
+		state.Detail = state.DockerDetail
+		return state, nil
 	}
+	state.DockerReady = true
+	state.DockerDetail = "Docker daemon 可用"
 	lines := strings.Fields(output)
 	if len(lines) < 3 || lines[0] != "Linux" {
 		return SharedServerState{}, errors.New("共享服务需要 Linux Docker 服务器")
@@ -83,10 +121,18 @@ func (r *Remote) PreflightSharedServer(ctx context.Context, connection Connectio
 	if err != nil {
 		return SharedServerState{}, err
 	}
-	state, err := r.InspectSharedServer(ctx, connection)
+	workerPath, err := bundledBuildWorkerPath(arch)
 	if err != nil {
 		return SharedServerState{}, err
 	}
+	installedState, err := r.InspectSharedServer(ctx, connection)
+	if err != nil {
+		return SharedServerState{}, err
+	}
+	state = installedState
+	state.DockerInstalled = true
+	state.DockerReady = true
+	state.DockerDetail = "Docker daemon 可用"
 	state.Architecture = arch
 	if state.Installed {
 		binary, readErr := os.ReadFile(path)
@@ -99,6 +145,21 @@ func (r *Remote) PreflightSharedServer(ctx context.Context, connection Connectio
 		}
 		state.LatestImageTag = currentTag
 		state.UpdateAvailable = state.ImageTag != currentTag
+		workerBinary, readErr := os.ReadFile(workerPath)
+		if readErr != nil {
+			return SharedServerState{}, readErr
+		}
+		workerTag, _, buildErr := workerBuildContext(workerBinary)
+		if buildErr != nil {
+			return SharedServerState{}, buildErr
+		}
+		state.LatestWorkerTag = workerTag
+		if state.WorkerImageTag != workerTag {
+			state.UpdateAvailable = true
+		}
+		if !state.WorkerInstalled || !state.WorkerRunning {
+			state.UpdateAvailable = true
+		}
 		if !state.Healthy {
 			state.CanInstall = true
 			state.Detail = "已有共享服务容器未通过健康检查；重新部署时会保留旧容器，验证失败后自动恢复"
@@ -112,6 +173,14 @@ func (r *Remote) PreflightSharedServer(ctx context.Context, connection Connectio
 		state.Detail = "服务器已有运行正常的 iDeploy 共享服务容器"
 		return state, nil
 	}
+	orphanWorker, err := r.runTimeout(ctx, connection, "if docker container inspect ideploy-build-worker >/dev/null 2>&1; then echo PRESENT; else echo ABSENT; fi", 10*time.Second)
+	if err != nil {
+		return SharedServerState{}, err
+	}
+	if strings.TrimSpace(orphanWorker) == "PRESENT" {
+		state.Detail = "服务器已有同名构建执行器容器，需先核对来源及状态，停止自动接管"
+		return state, nil
+	}
 	ports, err := r.runTimeout(ctx, connection, "docker ps --format '{{.Ports}}'", 15*time.Second)
 	if err != nil {
 		return SharedServerState{}, err
@@ -123,6 +192,18 @@ func (r *Remote) PreflightSharedServer(ctx context.Context, connection Connectio
 	state.Detail = "Linux Docker 可用；应用包包含匹配架构的服务程序，容器名与端口可用"
 	state.CanInstall = true
 	return state, nil
+}
+
+func (r *Remote) CheckBuildWorker(ctx context.Context, connection Connection, compose bool) error {
+	flag := "--probe"
+	if compose {
+		flag = "--probe-compose"
+	}
+	_, err := r.runTimeout(ctx, connection, "docker exec "+buildWorkerContainer+" /usr/local/bin/ideploy-worker "+flag, 20*time.Second)
+	if err != nil {
+		return fmt.Errorf("iDeploy 构建执行器未就绪，请检查执行器及其 Docker 工具: %w", err)
+	}
+	return nil
 }
 
 func (r *Remote) InspectSharedServer(ctx context.Context, connection Connection) (SharedServerState, error) {
@@ -139,6 +220,18 @@ func (r *Remote) InspectSharedServer(ctx context.Context, connection Connection)
 		return SharedServerState{}, errors.New("同名容器不属于 iDeploy，停止接管")
 	}
 	state := SharedServerState{Installed: true, Running: parts[1] == "true", ImageTag: parts[2], Detail: "容器已安装"}
+	worker, workerErr := r.runTimeout(ctx, connection, "if docker container inspect ideploy-build-worker >/dev/null 2>&1; then docker container inspect ideploy-build-worker --format '{{index .Config.Labels \"com.ideploy.role\"}}|{{.State.Running}}|{{.Config.Image}}'; else echo ABSENT; fi", 15*time.Second)
+	if workerErr == nil {
+		workerParts := strings.Split(strings.TrimSpace(worker), "|")
+		if len(workerParts) == 3 && workerParts[0] == "build-worker" {
+			state.WorkerInstalled = true
+			state.WorkerRunning = workerParts[1] == "true"
+			state.WorkerImageTag = workerParts[2]
+		}
+		if strings.TrimSpace(worker) != "ABSENT" && !state.WorkerInstalled {
+			return SharedServerState{}, errors.New("同名构建执行器容器不属于 iDeploy，停止接管")
+		}
+	}
 	if !state.Running {
 		state.Detail = "共享服务容器未运行"
 		return state, nil
@@ -177,8 +270,32 @@ func sharedServerBuildContext(binary []byte) (string, string, error) {
 	return tag, buffer.String(), nil
 }
 
-func (r *Remote) DeploySharedServer(ctx context.Context, connection Connection, architecture string, database SharedServerDatabase, token string) error {
-	if database.Host == "" || database.Port < 1 || database.Port > 65535 || database.Name == "" || database.User == "" || database.Password == "" || len(token) < 32 || strings.ContainsAny(database.Host+database.Name+database.User, "\r\n\x00") {
+func workerBuildContext(binary []byte) (string, string, error) {
+	sum := sha256.Sum256(binary)
+	tag := "ideploy/build-worker:" + hex.EncodeToString(sum[:8])
+	var buffer bytes.Buffer
+	writer := tar.NewWriter(&buffer)
+	dockerfile := []byte("FROM docker:27-cli\nRUN apk add --no-cache git openssh-client ca-certificates\nCOPY ideploy-worker /usr/local/bin/ideploy-worker\nENTRYPOINT [\"/usr/local/bin/ideploy-worker\"]\n")
+	for _, item := range []struct {
+		name string
+		data []byte
+		mode int64
+	}{{"Dockerfile", dockerfile, 0644}, {"ideploy-worker", binary, 0755}} {
+		if err := writer.WriteHeader(&tar.Header{Name: item.name, Mode: item.mode, Size: int64(len(item.data)), Typeflag: tar.TypeReg}); err != nil {
+			return "", "", err
+		}
+		if _, err := writer.Write(item.data); err != nil {
+			return "", "", err
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return "", "", err
+	}
+	return tag, buffer.String(), nil
+}
+
+func (r *Remote) DeploySharedServer(ctx context.Context, connection Connection, architecture string, database SharedServerDatabase, token, workerToken string) error {
+	if database.Host == "" || database.Port < 1 || database.Port > 65535 || database.Name == "" || database.User == "" || database.Password == "" || len(token) < 32 || len(workerToken) < 32 || strings.ContainsAny(database.Host+database.Name+database.User, "\r\n\x00") {
 		return errors.New("共享服务数据库配置无效")
 	}
 	path, err := bundledSharedServerPath(architecture)
@@ -190,6 +307,18 @@ func (r *Remote) DeploySharedServer(ctx context.Context, connection Connection, 
 		return err
 	}
 	tag, archive, err := sharedServerBuildContext(binary)
+	if err != nil {
+		return err
+	}
+	workerPath, err := bundledBuildWorkerPath(architecture)
+	if err != nil {
+		return err
+	}
+	workerBinary, err := os.ReadFile(workerPath)
+	if err != nil {
+		return err
+	}
+	workerTag, workerArchive, err := workerBuildContext(workerBinary)
 	if err != nil {
 		return err
 	}
@@ -217,14 +346,21 @@ func (r *Remote) DeploySharedServer(ctx context.Context, connection Connection, 
 	secretSuffix := strconv.FormatInt(time.Now().UnixNano(), 10)
 	passwordPath := filepath.Join(base, "mysql_password_"+secretSuffix)
 	tokenPath := filepath.Join(base, "server_token_"+secretSuffix)
+	workerTokenPath := filepath.Join(base, "worker_token_"+secretSuffix)
 	if err = r.uploadSharedSecret(ctx, connection, passwordPath, database.Password); err != nil {
 		return err
 	}
 	if err = r.uploadSharedSecret(ctx, connection, tokenPath, token); err != nil {
 		return err
 	}
+	if err = r.uploadSharedSecret(ctx, connection, workerTokenPath, workerToken); err != nil {
+		return err
+	}
 	if _, err = r.runTimeoutWithInput(ctx, connection, "docker build -q -t "+shellQuote(tag)+" -", 5*time.Minute, archive); err != nil {
 		return fmt.Errorf("构建共享服务镜像: %w", err)
+	}
+	if _, err = r.runTimeoutWithInput(ctx, connection, "docker build -q -t "+shellQuote(workerTag)+" -", 5*time.Minute, workerArchive); err != nil {
+		return fmt.Errorf("构建远端执行器镜像: %w", err)
 	}
 	uid, err := r.runTimeout(ctx, connection, "id -u; id -g", 8*time.Second)
 	if err != nil {
@@ -241,34 +377,64 @@ func (r *Remote) DeploySharedServer(ctx context.Context, connection Connection, 
 		return err
 	}
 	backupName := sharedServerContainer + "-backup-" + secretSuffix
+	workerBackupName := buildWorkerContainer + "-backup-" + secretSuffix
+	if state.WorkerInstalled {
+		if _, err = r.runTimeout(ctx, connection, "docker stop "+shellQuote(buildWorkerContainer)+" && docker rename "+shellQuote(buildWorkerContainer)+" "+shellQuote(workerBackupName), 35*time.Second); err != nil {
+			return fmt.Errorf("备份原构建执行器失败: %w", err)
+		}
+	}
 	if state.Installed {
 		if _, err = r.runTimeout(ctx, connection, "docker stop "+shellQuote(sharedServerContainer)+" && docker rename "+shellQuote(sharedServerContainer)+" "+shellQuote(backupName), 35*time.Second); err != nil {
 			_, _ = r.runTimeout(ctx, connection, "docker start "+shellQuote(sharedServerContainer), 15*time.Second)
+			if state.WorkerInstalled {
+				_, _ = r.runTimeout(ctx, connection, "docker rename "+shellQuote(workerBackupName)+" "+shellQuote(buildWorkerContainer)+" && docker start "+shellQuote(buildWorkerContainer), 20*time.Second)
+			}
 			return fmt.Errorf("备份原共享服务容器失败: %w", err)
 		}
 	}
 	restore := func() {
-		if !state.Installed {
-			return
-		}
 		restoreCtx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 		defer cancel()
-		_, _ = r.runTimeout(restoreCtx, connection, "docker rm -f "+shellQuote(sharedServerContainer)+" >/dev/null 2>&1 || true; docker rename "+shellQuote(backupName)+" "+shellQuote(sharedServerContainer)+" && docker start "+shellQuote(sharedServerContainer), 35*time.Second)
+		_, _ = r.runTimeout(restoreCtx, connection, "docker rm -f "+shellQuote(buildWorkerContainer)+" >/dev/null 2>&1 || true", 15*time.Second)
+		_, _ = r.runTimeout(restoreCtx, connection, "docker rm -f "+shellQuote(sharedServerContainer)+" >/dev/null 2>&1 || true", 15*time.Second)
+		if state.Installed {
+			_, _ = r.runTimeout(restoreCtx, connection, "docker rename "+shellQuote(backupName)+" "+shellQuote(sharedServerContainer)+" && docker start "+shellQuote(sharedServerContainer), 25*time.Second)
+		}
+		if state.WorkerInstalled {
+			_, _ = r.runTimeout(restoreCtx, connection, "docker rename "+shellQuote(workerBackupName)+" "+shellQuote(buildWorkerContainer)+" && docker start "+shellQuote(buildWorkerContainer), 25*time.Second)
+		}
 	}
 	tlsMode := "verify"
 	if database.SkipTLSVerify {
 		tlsMode = "skip-verify"
 	}
-	args := []string{"docker run -d --name " + sharedServerContainer, "--label com.ideploy.role=shared-server", "--restart unless-stopped", "--user " + ids[0] + ":" + ids[1], "-p 127.0.0.1:8765:8765", "-e IDEPLOY_DATABASE_DRIVER=mysql", "-e IDEPLOY_DB_HOST=" + shellQuote(database.Host), "-e IDEPLOY_DB_PORT=" + strconv.Itoa(database.Port), "-e IDEPLOY_DB_NAME=" + shellQuote(database.Name), "-e IDEPLOY_DB_USER=" + shellQuote(database.User), "-e IDEPLOY_DB_TLS_MODE=" + tlsMode, "-e IDEPLOY_DB_PASSWORD_FILE=/run/secrets/mysql_password", "-e IDEPLOY_SERVER_TOKEN_FILE=/run/secrets/server_token", "-e IDEPLOY_SERVER_LISTEN=0.0.0.0:8765", "-v " + shellQuote(passwordPath+":/run/secrets/mysql_password:ro"), "-v " + shellQuote(tokenPath+":/run/secrets/server_token:ro"), shellQuote(tag)}
+	args := []string{"docker run -d --name " + sharedServerContainer, "--label com.ideploy.role=shared-server", "--restart unless-stopped", "--user " + ids[0] + ":" + ids[1], "-p 127.0.0.1:8765:8765", "-e IDEPLOY_DATABASE_DRIVER=mysql", "-e IDEPLOY_DB_HOST=" + shellQuote(database.Host), "-e IDEPLOY_DB_PORT=" + strconv.Itoa(database.Port), "-e IDEPLOY_DB_NAME=" + shellQuote(database.Name), "-e IDEPLOY_DB_USER=" + shellQuote(database.User), "-e IDEPLOY_DB_TLS_MODE=" + tlsMode, "-e IDEPLOY_DB_PASSWORD_FILE=/run/secrets/mysql_password", "-e IDEPLOY_SERVER_TOKEN_FILE=/run/secrets/server_token", "-e IDEPLOY_WORKER_TOKEN_FILE=/run/secrets/worker_token", "-e IDEPLOY_SERVER_LISTEN=0.0.0.0:8765", "-v " + shellQuote(passwordPath+":/run/secrets/mysql_password:ro"), "-v " + shellQuote(tokenPath+":/run/secrets/server_token:ro"), "-v " + shellQuote(workerTokenPath+":/run/secrets/worker_token:ro"), shellQuote(tag)}
 	if _, err = r.runTimeout(ctx, connection, strings.Join(args, " "), 45*time.Second); err != nil {
 		restore()
 		return fmt.Errorf("启动共享服务容器: %w", err)
 	}
+	if err := r.waitForSharedServer(ctx, connection, database.Password, token); err != nil {
+		restore()
+		return err
+	}
+	workRoot := filepath.Join(base, "builds")
+	if _, err = r.runTimeout(ctx, connection, "install -d -m 700 "+shellQuote(workRoot), 12*time.Second); err != nil {
+		restore()
+		return err
+	}
+	workerArgs := []string{"docker run -d --name " + buildWorkerContainer, "--label com.ideploy.role=build-worker", "--restart unless-stopped", "--network container:" + sharedServerContainer, "-v /var/run/docker.sock:/var/run/docker.sock", "-v " + shellQuote(workerTokenPath+":/run/secrets/worker_token:ro"), "-v " + shellQuote(workRoot+":/var/lib/ideploy/builds"), "-e IDEPLOY_WORKER_TOKEN_FILE=/run/secrets/worker_token", "-e IDEPLOY_WORK_ROOT=/var/lib/ideploy/builds", shellQuote(workerTag)}
+	if _, err = r.runTimeout(ctx, connection, strings.Join(workerArgs, " "), 45*time.Second); err != nil {
+		restore()
+		return fmt.Errorf("启动构建执行器: %w", err)
+	}
 	for attempt := 0; attempt < 12; attempt++ {
 		current, checkErr := r.InspectSharedServer(ctx, connection)
-		if checkErr == nil && current.Healthy {
+		if checkErr == nil && current.Healthy && current.WorkerRunning {
 			if state.Installed {
 				_, _ = r.runTimeout(ctx, connection, "docker rm "+shellQuote(backupName), 15*time.Second)
+			}
+			if state.WorkerInstalled {
+				_, _ = r.runTimeout(ctx, connection, "docker rm "+shellQuote(workerBackupName), 15*time.Second)
 			}
 			return nil
 		}
@@ -292,6 +458,31 @@ func (r *Remote) DeploySharedServer(ctx context.Context, connection Connection, 
 		return errors.New("共享服务无法连接 MySQL：TLS 证书校验失败。请检查证书链、有效期及连接地址是否在证书 SAN 中，然后重新预检。容器日志：" + logs)
 	}
 	return errors.New("共享服务健康检查未通过；请检查数据库权限及容器日志：" + logs)
+}
+
+func (r *Remote) waitForSharedServer(ctx context.Context, connection Connection, databasePassword, token string) error {
+	deadline := time.NewTimer(60 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		output, err := r.runTimeout(ctx, connection, "docker inspect --format '{{.State.Running}}' "+shellQuote(sharedServerContainer)+" 2>/dev/null && curl --noproxy '*' --connect-timeout 2 --max-time 5 -fsS http://127.0.0.1:8765/healthz", 10*time.Second)
+		if err == nil && strings.Contains(output, `"status":"ready"`) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			logs, _ := r.runTimeout(ctx, connection, "docker logs --tail 30 "+shellQuote(sharedServerContainer)+" 2>&1", 12*time.Second)
+			logs = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(logs, databasePassword, "[已隐藏]"), token, "[已隐藏]"))
+			if len(logs) > 1800 {
+				logs = logs[len(logs)-1800:]
+			}
+			return fmt.Errorf("iDeploy 服务在 60 秒内未就绪，未启动构建执行器。请检查共享服务容器日志：%s", logs)
+		case <-ticker.C:
+		}
+	}
 }
 
 func (r *Remote) uploadSharedSecret(ctx context.Context, connection Connection, path, value string) error {

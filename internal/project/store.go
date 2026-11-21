@@ -116,8 +116,9 @@ func (s *Store) Update(ctx context.Context, id string, input Input, inspection I
 	}
 	if _, err := tx.ExecContext(ctx, `
         UPDATE project_sources SET kind = ?, local_path = ?, repository_url = ?, ref_kind = ?, ref_value = ?,
+            credential_ref = CASE WHEN kind='git' AND ?='git' AND repository_url=? THEN credential_ref ELSE '' END,
             status = ?, last_checked_at = ?, last_error = ? WHERE project_id = ?
-    `, input.SourceKind, input.LocalPath, input.RepositoryURL, input.RefKind, input.RefValue, status, lastChecked, lastError, id); err != nil {
+    `, input.SourceKind, input.LocalPath, input.RepositoryURL, input.RefKind, input.RefValue, input.SourceKind, input.RepositoryURL, status, lastChecked, lastError, id); err != nil {
 		return Project{}, fmt.Errorf("update project source: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -160,6 +161,14 @@ func (s *Store) UpdateInspection(ctx context.Context, id string, inspection Insp
 	return s.Get(ctx, id)
 }
 
+func (s *Store) SetCredentialRef(ctx context.Context, id, ref string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE project_sources SET credential_ref=? WHERE project_id=? AND kind='git'`, ref, id)
+	if err != nil {
+		return err
+	}
+	return requireAffected(result)
+}
+
 func (s *Store) Delete(ctx context.Context, id string) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE projects SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM deployment_targets WHERE project_id=projects.id) AND NOT EXISTS (SELECT 1 FROM jobs WHERE lock_key='project:' || projects.id AND status IN ('queued','running','canceling'))`, formatTime(time.Now()), formatTime(time.Now()), id)
 	if err != nil {
@@ -170,12 +179,15 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	} else if affected == 0 {
 		return errors.New("项目不存在、仍有部署关联或任务未完成，请先移除关联并等待任务结束")
 	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE project_sources SET credential_ref='' WHERE project_id=?`, id); err != nil {
+		return err
+	}
 	return nil
 }
 
 const projectSelect = `
     SELECT p.id, p.name, p.description, s.kind, s.local_path, s.repository_url, s.ref_kind, s.ref_value,
-           s.resolved_commit, s.status, s.last_checked_at, s.last_error,
+           s.resolved_commit, s.status, s.last_checked_at, s.last_error, s.credential_ref,
            b.context_path, b.dockerfile_path, b.compose_path, b.image_repository, p.created_at, p.updated_at
     FROM projects p
     JOIN project_sources s ON s.project_id = p.id
@@ -190,7 +202,7 @@ func scanProject(row scanner) (Project, error) {
 	var checkedAt sql.NullString
 	var createdAt, updatedAt string
 	if err := row.Scan(&value.ID, &value.Name, &value.Description, &kind, &value.LocalPath, &value.RepositoryURL,
-		&refKind, &value.RefValue, &value.ResolvedCommit, &status, &checkedAt, &value.LastError,
+		&refKind, &value.RefValue, &value.ResolvedCommit, &status, &checkedAt, &value.LastError, &value.CredentialRef,
 		&value.ContextPath, &value.DockerfilePath, &value.ComposePath, &value.ImageRepository, &createdAt, &updatedAt); err != nil {
 		return Project{}, err
 	}

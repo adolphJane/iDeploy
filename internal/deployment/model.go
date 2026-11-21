@@ -12,12 +12,22 @@ import (
 
 type DesiredState string
 
+type BuildMode string
+
+const (
+	BuildLocal  BuildMode = "local"
+	BuildRemote BuildMode = "remote"
+)
+
+func (mode BuildMode) Valid() bool { return mode == BuildLocal || mode == BuildRemote }
+
 const (
 	DesiredRunning DesiredState = "running"
 	DesiredStopped DesiredState = "stopped"
 )
 
 type Target struct {
+	BuildMode                  BuildMode
 	WorkloadKind               string
 	WorkloadName               string
 	ID                         string
@@ -33,6 +43,7 @@ type Target struct {
 }
 
 type Input struct {
+	BuildMode      BuildMode
 	WorkloadKind   string
 	WorkloadName   string
 	ProjectID      string
@@ -57,6 +68,12 @@ const (
 )
 
 type Release struct {
+	BuildMode           BuildMode
+	SourceCommit        string
+	DeliveryRef         string
+	DeliveryCommit      string
+	DeliveryDigest      string
+	RemoteJobID         string
 	ID                  string
 	DeploymentID        string
 	RegistryID          string
@@ -66,6 +83,7 @@ type Release struct {
 	ImageRef            string
 	SourceRevision      string
 	Manifest            string
+	manifestEnvelope    string
 	RollbackToID        string
 	Status              ReleaseStatus
 	Detail              string
@@ -86,6 +104,7 @@ type EnvironmentVariable struct {
 	Kind          string
 	PlainValue    string
 	CredentialRef string
+	BuildSecret   bool
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }
@@ -96,6 +115,7 @@ type EnvironmentChange struct {
 	Kind          string
 	PlainValue    string
 	CredentialRef string
+	BuildSecret   bool
 }
 
 var environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
@@ -111,6 +131,7 @@ func ValidateEnvironmentName(name string) (string, error) {
 func NewEnvironmentVariableID() (string, error) { return newID() }
 
 type ReleaseInput struct {
+	BuildMode    BuildMode
 	DeploymentID string
 	RegistryID   string
 	Action       string
@@ -123,6 +144,12 @@ type ReleaseInput struct {
 }
 
 func (input Input) Validate() (Input, error) {
+	if input.BuildMode == "" {
+		input.BuildMode = BuildLocal
+	}
+	if !input.BuildMode.Valid() {
+		return input, errors.New("不支持的构建位置")
+	}
 	input.WorkloadName = strings.TrimSpace(input.WorkloadName)
 	if input.WorkloadKind != "container" && input.WorkloadKind != "compose" {
 		return input, errors.New("请选择容器或 Compose 项目")

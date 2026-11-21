@@ -147,6 +147,10 @@ func (r *Runner) runNext(ctx context.Context) error {
 	r.mu.Unlock()
 
 	reporter := &storeReporter{store: r.store, jobID: claimed.ID, emit: r.emitLatest}
+	latest, readErr := r.store.Get(ctx, claimed.ID)
+	if readErr == nil && latest.CancelRequested {
+		cancel()
+	}
 	handlerErr := handler(jobContext, *claimed, reporter)
 	cancel()
 

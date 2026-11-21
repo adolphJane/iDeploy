@@ -28,6 +28,7 @@ func init() {
 	nativeMethods["RepairInternalIngress"] = true
 	nativeMethods["GetPreflightProgress"] = true
 	nativeMethods["ReadProjectFile"] = true
+	nativeMethods["GetProjectGitSummary"] = true
 	nativeMethods["SaveProjectFile"] = true
 	nativeMethods["CheckServerCertificate"] = true
 	nativeMethods["IssueServerCertificate"] = true

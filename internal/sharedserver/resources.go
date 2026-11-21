@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"strings"
 
@@ -71,6 +72,20 @@ func rejectSecrets(value any) error {
 	return nil
 }
 
+func validateResourceCredentials(kind string, data map[string]any) error {
+	if flag, present := data["build_secret"]; kind == "r.env" && present {
+		// SQLite exports this scope marker as 0 or 1. The credential itself
+		// travels separately through the encrypted secrets API.
+		scope, ok := flag.(float64)
+		if !ok || (scope != 0 && scope != 1) || (scope == 1 && data["kind"] != "secret") {
+			return errors.New("invalid build_secret scope flag")
+		}
+		data = maps.Clone(data)
+		delete(data, "build_secret")
+	}
+	return rejectSecrets(data)
+}
+
 func (s *Server) listResources(w http.ResponseWriter, r *http.Request) {
 	kind, _, ok := validResource(w, r, false)
 	if !ok {
@@ -115,7 +130,7 @@ func (s *Server) putResource(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid resource write", http.StatusBadRequest)
 		return
 	}
-	if err := rejectSecrets(input.Data); err != nil {
+	if err := validateResourceCredentials(kind, input.Data); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

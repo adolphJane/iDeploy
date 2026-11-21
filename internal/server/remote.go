@@ -375,6 +375,24 @@ func (r *Remote) UpCompose(ctx context.Context, connection Connection, deploymen
 	return err
 }
 
+func (r *Remote) DownCompose(ctx context.Context, connection Connection, deploymentID, projectName, version string) error {
+	command, err := composeCommand(deploymentID, projectName, version)
+	if err != nil {
+		return err
+	}
+	_, err = r.runTimeout(ctx, connection, command+" down --remove-orphans", 5*time.Minute)
+	return err
+}
+
+func (r *Remote) RestoreStoppedCompose(ctx context.Context, connection Connection, deploymentID, projectName, version string) error {
+	command, err := composeCommand(deploymentID, projectName, version)
+	if err != nil {
+		return err
+	}
+	_, err = r.runTimeout(ctx, connection, command+" up --no-start --remove-orphans && "+command+" stop", 5*time.Minute)
+	return err
+}
+
 func composeCommand(deploymentID, projectName, version string) (string, error) {
 	if !validContainerID(deploymentID) || !validContainerID(projectName) || !safeVersionPattern.MatchString(version) {
 		return "", errors.New("invalid compose deployment identifier")

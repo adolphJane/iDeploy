@@ -32,6 +32,27 @@ func TestPortableResourceRejectsRepositoryCredentials(t *testing.T) {
 	}
 }
 
+func TestPortableEnvironmentBuildSecretScope(t *testing.T) {
+	for _, test := range []struct {
+		kind, data string
+		valid      bool
+	}{
+		{"r.env", `{"kind":"secret","build_secret":1}`, true},
+		{"r.env", `{"kind":"plain","build_secret":0}`, true},
+		{"r.env", `{"kind":"plain","build_secret":1}`, false},
+		{"r.env", `{"kind":"secret","build_secret":"sample"}`, false},
+		{"r.env", `{"kind":"secret","build_secret":{"token":"sample"}}`, false},
+		{"r.env", `{"kind":"secret","build_secret":1,"credential_ref":"sample"}`, false},
+		{"r.env", `{"kind":"secret","build_secret":1,"name":{"token":"sample"}}`, false},
+		{"r.projects", `{"build_secret":0}`, false},
+	} {
+		err := validateImportRecord(importRecord{Kind: test.kind, ID: "sample", Data: []byte(test.data)})
+		if (err == nil) != test.valid {
+			t.Errorf("validate %s %s: %v", test.kind, test.data, err)
+		}
+	}
+}
+
 func TestPortableInternalIngressAcceptsFullLengthDomain(t *testing.T) {
 	id := strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + ".example.com"
 	data, err := json.Marshal(map[string]any{"fqdn": id, "server_id": "server", "gateway_port": 8766, "status": "draft", "updated_at": "2026-01-01"})

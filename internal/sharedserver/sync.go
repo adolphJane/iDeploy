@@ -19,11 +19,15 @@ import (
 )
 
 func ensureSyncSchema(ctx context.Context, db *sql.DB, driver string) error {
+	envelopeType := "TEXT"
+	if driver == "mysql" {
+		envelopeType = "MEDIUMTEXT"
+	}
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS shared_imports (id VARCHAR(128) PRIMARY KEY, digest VARCHAR(64) NOT NULL, item_count INTEGER NOT NULL, created_at VARCHAR(32) NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS shared_mutations (id VARCHAR(128) PRIMARY KEY, digest VARCHAR(64) NOT NULL, created_at VARCHAR(32) NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS shared_vault (id SMALLINT PRIMARY KEY, configuration TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS shared_secrets (id VARCHAR(128) PRIMARY KEY, revision BIGINT NOT NULL, envelope TEXT NOT NULL, updated_at VARCHAR(32) NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS shared_secrets (id VARCHAR(128) PRIMARY KEY, revision BIGINT NOT NULL, envelope ` + envelopeType + ` NOT NULL, updated_at VARCHAR(32) NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS shared_pairings (code_hash VARCHAR(64) PRIMARY KEY, expires_at VARCHAR(32) NOT NULL, used_at VARCHAR(32))`,
 		`CREATE TABLE IF NOT EXISTS shared_leases (resource_id VARCHAR(128) PRIMARY KEY, request_id VARCHAR(128) NOT NULL, owner_hash VARCHAR(64) NOT NULL, expires_at VARCHAR(32) NOT NULL)`,
 	}
@@ -39,7 +43,31 @@ func ensureSyncSchema(ctx context.Context, db *sql.DB, driver string) error {
 			return err
 		}
 	}
+	if driver == "mysql" {
+		return widenMySQLText(ctx, db, "shared_secrets", "envelope", `ALTER TABLE shared_secrets MODIFY COLUMN envelope MEDIUMTEXT NOT NULL`)
+	}
 	return nil
+}
+
+func widenMySQLText(ctx context.Context, db *sql.DB, table, column, alter string) error {
+	var currentType string
+	if err := db.QueryRowContext(ctx, `SELECT DATA_TYPE FROM information_schema.COLUMNS
+		WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?`, table, column).Scan(&currentType); err != nil {
+		return err
+	}
+	if currentType == "text" {
+		_, err := db.ExecContext(ctx, alter)
+		return err
+	}
+	return nil
+}
+
+func secretEnvelopeLimit(secretID string) int {
+	parts := strings.Split(secretID, ":")
+	if len(parts) == 3 && parts[0] == "r.releases" && releaseIDPattern.MatchString(parts[1]) && parts[2] == "manifest" {
+		return 1300 * 1024 // 900 KiB plus Base64 and envelope metadata.
+	}
+	return 256 * 1024
 }
 
 type changeItem struct {
@@ -121,7 +149,7 @@ func validateImportRecord(value importRecord) error {
 	if err := json.Unmarshal(value.Data, &data); err != nil || data == nil {
 		return errors.New("invalid resource data")
 	}
-	if err := rejectSecrets(data); err != nil {
+	if err := validateResourceCredentials(value.Kind, data); err != nil {
 		return err
 	}
 	for key := range data {
@@ -379,7 +407,8 @@ func (s *Server) putSecret(w http.ResponseWriter, r *http.Request) {
 		ExpectedRevision int64           `json:"expectedRevision"`
 		Envelope         json.RawMessage `json:"envelope"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256*1024)).Decode(&input); err != nil || input.ExpectedRevision < 0 || len(input.Envelope) < 64 || !json.Valid(input.Envelope) {
+	limit := secretEnvelopeLimit(id)
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, int64(limit)+1024)).Decode(&input); err != nil || input.ExpectedRevision < 0 || len(input.Envelope) < 64 || len(input.Envelope) > limit || !json.Valid(input.Envelope) {
 		http.Error(w, "invalid encrypted secret", http.StatusBadRequest)
 		return
 	}

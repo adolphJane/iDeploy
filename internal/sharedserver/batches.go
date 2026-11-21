@@ -58,7 +58,7 @@ func (s *Server) writeBatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for _, item := range input.Secrets {
-		if item.ID == "" || len(item.ID) > 128 || item.ExpectedRevision < 0 || seen["secret/"+item.ID] || len(item.Envelope) > 256*1024 {
+		if item.ID == "" || len(item.ID) > 128 || item.ExpectedRevision < 0 || seen["secret/"+item.ID] || len(item.Envelope) > secretEnvelopeLimit(item.ID) {
 			http.Error(w, "invalid secret", http.StatusBadRequest)
 			return
 		}

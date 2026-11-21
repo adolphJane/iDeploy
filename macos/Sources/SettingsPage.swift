@@ -6,7 +6,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
     case terminal = "终端集成"
     case build = "构建与智能"
     case data = "本机数据"
-    case shared = "共享服务"
+    case shared = "iDeploy 服务"
     case ingress = "应用入口"
 
     var id: String { rawValue }
@@ -26,7 +26,7 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
         case .terminal: "命令行与 MCP"
         case .build: "构建代理与 AI"
         case .data: "文件、缓存和清理"
-        case .shared: "远程部署与 MySQL"
+        case .shared: "远端构建、共享工作区与 MySQL"
         case .ingress: "域名、HTTPS 与项目路径"
         }
     }
@@ -339,7 +339,7 @@ struct SettingsPage: View {
 
     private var sharedSettings: some View {
         VStack(alignment: .leading, spacing: 16) {
-            card("共享服务远程部署", "将 iDeploy Server 作为 Docker 容器安装到已连接服务器", symbol: "server.rack") {
+            card("iDeploy 服务远程部署", "安装服务与独立构建执行器到已连接服务器", symbol: "server.rack") {
                 Picker("目标服务器", selection: $sharedServerID) {
                     Text("选择服务器").tag("")
                     ForEach(model.servers, id: \.id) { item in Text(item["name"].string).tag(item.id) }
@@ -393,6 +393,16 @@ struct SettingsPage: View {
                     if sharedBusy { ProgressView().controlSize(.small) }
                 }
                 if !sharedStatus.isNull {
+                    HStack(spacing: 8) {
+                        AppStatusBadge(title: sharedStatus["dockerReady"].bool ? "服务器 Docker 可用" : sharedStatus["dockerInstalled"].bool ? "Docker 引擎不可用" : "未安装 Docker", tone: sharedStatus["dockerReady"].bool ? .success : .warning)
+                        if sharedStatus["installed"].bool {
+                            AppStatusBadge(title: sharedStatus["workerRunning"].bool ? "构建执行器运行中" : "构建执行器未运行", tone: sharedStatus["workerRunning"].bool ? .success : .warning)
+                        }
+                    }
+                    if !sharedStatus["dockerReady"].bool {
+                        Text(sharedStatus["dockerDetail"].string)
+                            .font(.system(size: 11)).foregroundStyle(.orange).textSelection(.enabled)
+                    }
                     if sharedStatus["installed"].bool {
                         HStack(spacing: 8) {
                             AppStatusBadge(title: sharedStatus["updateAvailable"].bool ? "有可用更新" : "已是最新版本", tone: sharedStatus["updateAvailable"].bool ? .warning : .success)
@@ -407,7 +417,7 @@ struct SettingsPage: View {
                 if !sharedPlan.isNull {
                     Text(sharedPlan["detail"].string).font(.system(size: 11)).foregroundStyle(DeployStyle.muted).textSelection(.enabled)
                     if sharedPlan["canDeploy"].bool {
-                        Button(sharedPlan["repair"].bool ? "修复并重新部署" : sharedPlan["upgrade"].bool ? "更新共享服务" : "部署共享服务") { deploySharedServer() }
+                        Button(sharedPlan["repair"].bool ? "修复并重新部署" : sharedPlan["upgrade"].bool ? "更新 iDeploy 服务" : "部署 iDeploy 服务") { deploySharedServer() }
                             .buttonStyle(DeployPrimaryButtonStyle()).disabled(sharedBusy)
                     }
                 }

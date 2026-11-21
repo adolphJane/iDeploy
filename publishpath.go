@@ -97,6 +97,10 @@ func (s *SystemService) validateReleaseContainerPort(ctx context.Context, releas
 
 // applyReleasePath runs inside the server-locked release job, after the new workload is healthy.
 func (s *SystemService) applyReleasePath(ctx context.Context, releaseID, jobID string, targetServer server.Connection) error {
+	return s.applyReleasePathObservingIngress(ctx, releaseID, jobID, targetServer, nil)
+}
+
+func (s *SystemService) applyReleasePathObservingIngress(ctx context.Context, releaseID, jobID string, targetServer server.Connection, onApply func(server.ExistingNginx)) error {
 	store, err := s.domainStore()
 	if err != nil {
 		return err
@@ -156,6 +160,9 @@ func (s *SystemService) applyReleasePath(ctx context.Context, releaseID, jobID s
 	}
 	if current.ImageRef != "nginx:"+item.Container || current.ConfigHash != item.Hash {
 		return errors.New("Nginx 配置与已保存版本不一致，请先修复入口")
+	}
+	if onApply != nil {
+		onApply(item)
 	}
 	hash, err := remote.ApplyExistingNginxWithAgent(ctx, targetServer, targetServer.ID, jobID, desired, current.ConfigHash, item.Container)
 	if err != nil {

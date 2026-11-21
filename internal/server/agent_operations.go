@@ -113,6 +113,49 @@ func (r *Remote) UpComposeWithAgent(ctx context.Context, connection Connection, 
 	return err
 }
 
+// WaitComposeStage waits for an accepted Agent operation before replacing its
+// manifest. A missing operation also covers commands run through the SSH fallback.
+func (r *Remote) WaitComposeStage(ctx context.Context, connection Connection, serverID, jobID, deploymentID, stage string) error {
+	return r.waitAgentStage(ctx, connection, serverID, AgentStageID(jobID, "compose."+stage+":"+deploymentID))
+}
+
+func (r *Remote) WaitNginxApply(ctx context.Context, connection Connection, serverID, jobID, container string) error {
+	return r.waitAgentStage(ctx, connection, serverID, AgentStageID(jobID, "nginx.apply:"+container))
+}
+
+func (r *Remote) waitAgentStage(ctx context.Context, connection Connection, serverID, id string) error {
+	if _, err := LoadPassword(ctx, AgentPairingCredentialRef(serverID)); err != nil {
+		return nil
+	}
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		data, err := r.AgentOperationStatus(ctx, connection, serverID, id)
+		var statusErr *agentHTTPStatusError
+		if errors.As(err, &statusErr) && statusErr.code == 404 {
+			return nil
+		}
+		if err == nil {
+			var state agentOperationState
+			if err := json.Unmarshal(data, &state); err != nil {
+				return err
+			}
+			switch state.Status {
+			case "succeeded", "failed":
+				return nil
+			case "running":
+			default:
+				return fmt.Errorf("Agent 操作 %s 状态不确定: %s", id, state.Status)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("无法确认 Agent 操作 %s 已结束: %w", id, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
 func (r *Remote) ApplyExistingNginxWithAgent(ctx context.Context, connection Connection, serverID, jobID string, routes []IngressRoute, expectedHash, expectedContainer string) (string, error) {
 	item, config, _, err := r.PreviewExistingNginx(ctx, connection, routes, expectedHash)
 	if err != nil {

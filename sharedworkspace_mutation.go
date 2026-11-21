@@ -116,7 +116,11 @@ func (s *SystemService) completeSharedWrite() error {
 }
 
 func (s *SystemService) PushSharedWorkspace() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	return s.pushSharedWorkspace(context.Background())
+}
+
+func (s *SystemService) pushSharedWorkspace(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
 	defer cancel()
 	status, err := s.GetSharedWorkspaceStatus()
 	if err != nil || status.Mode != "shared" {

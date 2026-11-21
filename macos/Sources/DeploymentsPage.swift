@@ -489,6 +489,7 @@ struct DeploymentFormView: View {
     @State private var workloadName: String
     @State private var ports: String
     @State private var restartPolicy: String
+    @State private var buildMode: String
 
     init(deployment: J?) {
         self.deployment = deployment
@@ -498,6 +499,7 @@ struct DeploymentFormView: View {
         _workloadName = State(initialValue: deployment?["workloadName"].string ?? "")
         _ports = State(initialValue: deployment?["containerPorts"].array.map(\.string).joined(separator: ", ") ?? "")
         _restartPolicy = State(initialValue: deployment?["restartPolicy"].string ?? "unless-stopped")
+        _buildMode = State(initialValue: deployment?["buildMode"].string ?? "local")
     }
 
     var body: some View {
@@ -549,6 +551,15 @@ struct DeploymentFormView: View {
                                 .labelsHidden()
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             }
+                        }
+                        Picker("构建位置", selection: $buildMode) {
+                            Text("本机构建").tag("local")
+                            Text("iDeploy 服务构建").tag("remote")
+                        }
+                        .accessibilityLabel("发布构建位置")
+                        if buildMode == "remote" {
+                            Text("远端构建要求 Git 项目；发布前会将部署文件推送到 Git，再由 iDeploy 服务构建。")
+                                .font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
                         }
                     }
                     .padding(16)
@@ -623,7 +634,7 @@ struct DeploymentFormView: View {
                             "projectId": projectID, "serverId": serverID, "workloadKind": workloadKind,
                             "workloadName": workloadName,
                             "containerPorts": ports.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) },
-                            "restartPolicy": restartPolicy
+                            "restartPolicy": restartPolicy, "buildMode": buildMode
                         ]
                         let result = await model.perform(deployment == nil ? "CreateDeployment" : "ConfigureDeployment",
                                                          deployment == nil ? [input] : [deployment!.id, input])
@@ -632,13 +643,14 @@ struct DeploymentFormView: View {
                 }
                 .buttonStyle(DeployPrimaryButtonStyle())
                 .keyboardShortcut(.defaultAction)
-                .disabled(projectID.isEmpty || serverID.isEmpty || workloadName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(projectID.isEmpty || serverID.isEmpty || workloadName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                          (buildMode == "remote" && model.projects.first(where: { $0.id == projectID })?["sourceKind"].string != "git"))
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 16)
             .background(DeployStyle.overviewPanel)
         }
-        .frame(width: 650, height: workloadKind == "compose" ? 470 : 540)
+        .frame(width: 650, height: workloadKind == "compose" ? 520 : 600)
         .environment(\.colorScheme, .light)
     }
 }
@@ -693,6 +705,8 @@ struct PublishView: View {
                         Text("发布配置")
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(DeployStyle.ink)
+                        Text(deployment["buildMode"].string == "remote" ? "构建位置：iDeploy 服务" : "构建位置：本机")
+                            .font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
                         Picker("镜像仓库", selection: $registryID) {
                             Text("选择镜像仓库").tag("")
                             ForEach(model.registries, id: \.id) { registry in
@@ -956,7 +970,8 @@ struct PublishView: View {
             return
         }
         publishing = true
-        publishStage = "正在检查本机 SSH、Docker 和 Git…"
+        let remoteBuild = deployment["buildMode"].string == "remote"
+        publishStage = remoteBuild ? "正在检查本机 SSH、Git 与远端服务…" : "正在检查本机 SSH、Docker 和 Git…"
         publishError = ""
         Task {
             defer { publishing = false }
@@ -967,7 +982,8 @@ struct PublishView: View {
                     publishError = "未能读取本机工具状态，请重试。"
                     return
                 }
-                let unavailable = tools.filter { ["SSH", "Docker", "Git"].contains($0["name"].string) && !$0["available"].bool }
+                let requiredTools = remoteBuild ? ["SSH", "Git"] : ["SSH", "Docker", "Git"]
+                let unavailable = tools.filter { requiredTools.contains($0["name"].string) && !$0["available"].bool }
                 guard unavailable.isEmpty else {
                     publishError = "本机发布环境未就绪：\n" + unavailable.map {
                         let name = $0["name"].string
@@ -1006,6 +1022,7 @@ struct EnvironmentEditorView: View {
     @State private var name = ""
     @State private var value = ""
     @State private var kind = "plain"
+    @State private var buildSecret = false
     @State private var loading = false
     @State private var saving = false
     @State private var error = ""
@@ -1013,7 +1030,8 @@ struct EnvironmentEditorView: View {
     @FocusState private var nameFocused: Bool
     @FocusState private var valueFocused: Bool
 
-    private var supportsVariables: Bool { deployment["workloadKind"].string == "container" }
+    private var composeBuildOnly: Bool { deployment["workloadKind"].string == "compose" && deployment["buildMode"].string == "remote" }
+    private var supportsVariables: Bool { deployment["workloadKind"].string == "container" || composeBuildOnly }
     private var current: J? { variables.first { $0["name"].string == editingName } }
     private var filteredVariables: [J] {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1027,7 +1045,7 @@ struct EnvironmentEditorView: View {
         editingName == nil && variables.contains { $0["name"].string == normalizedName }
     }
     private var canSave: Bool {
-        supportsVariables && validName && !duplicateName && !saving && !loading &&
+        supportsVariables && (!composeBuildOnly || (kind == "secret" && buildSecret)) && validName && !duplicateName && !saving && !loading &&
             (kind == "plain" || !value.isEmpty || (current?["kind"].string == "secret" && current?["configured"].bool == true))
     }
 
@@ -1052,7 +1070,7 @@ struct EnvironmentEditorView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     if !supportsVariables {
-                        Label("当前版本只支持单容器部署的环境变量；Compose 变量请在 Compose 文件中配置。", systemImage: "info.circle")
+                        Label("当前部署类型不能配置环境变量；远端 Compose 可配置 BuildKit 构建秘密。", systemImage: "info.circle")
                             .font(.system(size: 12))
                             .foregroundStyle(DeployStyle.muted)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1099,7 +1117,7 @@ struct EnvironmentEditorView: View {
                                                     Text(item["name"].string)
                                                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
                                                         .foregroundStyle(DeployStyle.ink)
-                                                    Text(item["kind"].string == "secret" ? "秘密值 · 已存入钥匙串" : item["value"].string.isEmpty ? "普通值 · 空值" : "普通值 · \(item["value"].string)")
+                                                    Text(composeBuildOnly ? "秘密值 · 仅远端构建时" : item["kind"].string == "secret" ? (item["buildSecret"].bool ? "秘密值 · 运行时及远端构建时" : "秘密值 · 运行时") : item["value"].string.isEmpty ? "普通值 · 空值" : "普通值 · \(item["value"].string)")
                                                         .font(.system(size: 11))
                                                         .foregroundStyle(DeployStyle.muted)
                                                         .lineLimit(1)
@@ -1175,10 +1193,17 @@ struct EnvironmentEditorView: View {
                                 value = ""
                             }
                         )) {
-                            Text("普通值").tag("plain")
+                            if !composeBuildOnly { Text("普通值").tag("plain") }
                             Text("秘密值").tag("secret")
                         }
                         .disabled(saving)
+                        if kind == "secret" {
+                            Toggle("远端构建时作为 BuildKit secret 提供", isOn: $buildSecret)
+                                .toggleStyle(.checkbox)
+                                .disabled(composeBuildOnly)
+                            Text(composeBuildOnly ? "Compose 文件需在 build.secrets 引用变量名，并在顶层 secrets 声明 environment: 变量名；秘密值不会写入 Git。" : "Dockerfile 可使用 RUN --mount=type=secret,id=变量名 读取；秘密值不会写入 Git。")
+                                .foregroundStyle(DeployStyle.muted)
+                        }
                         VStack(alignment: .leading, spacing: 6) {
                             Text(kind == "secret" ? "秘密值" : "值")
                                 .font(.system(size: 12, weight: .medium))
@@ -1240,7 +1265,7 @@ struct EnvironmentEditorView: View {
         }
         .frame(width: 680, height: 620)
         .environment(\.colorScheme, .light)
-        .task { load() }
+        .task { resetEditor(); load() }
         .confirmationDialog("删除环境变量 \(deleteTarget?["name"].string ?? "")？", isPresented: Binding(
             get: { deleteTarget != nil },
             set: { if !$0 { deleteTarget = nil } }
@@ -1258,6 +1283,7 @@ struct EnvironmentEditorView: View {
         editingName = item["name"].string
         name = item["name"].string
         kind = item["kind"].string
+        buildSecret = item["buildSecret"].bool
         value = kind == "secret" ? "" : item["value"].string
         error = ""
         nameFocused = false
@@ -1267,7 +1293,8 @@ struct EnvironmentEditorView: View {
     private func resetEditor(focus: Bool = false) {
         editingName = nil
         name = ""
-        kind = "plain"
+        kind = composeBuildOnly ? "secret" : "plain"
+        buildSecret = composeBuildOnly
         value = ""
         error = ""
         valueFocused = false
@@ -1296,7 +1323,7 @@ struct EnvironmentEditorView: View {
         error = ""
         let input: [String: Any] = [
             "deploymentId": deployment.id,
-            "variables": [["name": normalizedName, "kind": kind, "value": value]],
+            "variables": [["name": normalizedName, "kind": kind, "value": value, "buildSecret": kind == "secret" && buildSecret]],
             "remove": []
         ]
         Task {

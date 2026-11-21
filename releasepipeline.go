@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ideploy/internal/deployment"
+	"ideploy/internal/gitauth"
 	"ideploy/internal/job"
 	"ideploy/internal/platform/toolchain"
 	"ideploy/internal/project"
@@ -51,20 +52,43 @@ func prepareReleaseSource(ctx context.Context, value project.Project, cacheDir s
 	}
 	cleanup := func() { _ = os.RemoveAll(directory) }
 	reporter.Log("正在拉取 Git 项目 " + value.RepositoryURL)
-	if _, err := runLocalCommand(ctx, "", nil, git.Path, "clone", "--no-checkout", value.RepositoryURL, directory); err != nil {
-		cleanup()
-		return preparedSource{}, err
+	var gitEnvironment []string
+	if value.CredentialRef != "" {
+		credential, loadErr := gitauth.Load(ctx, value.CredentialRef)
+		if loadErr != nil {
+			cleanup()
+			return preparedSource{}, loadErr
+		}
+		var authCleanup func()
+		gitEnvironment, authCleanup, err = gitauth.Environment(credential)
+		if err != nil {
+			cleanup()
+			return preparedSource{}, err
+		}
+		defer authCleanup()
 	}
-	if _, err := runLocalCommand(ctx, "", nil, git.Path, "-C", directory, "checkout", "--detach", value.RefValue); err != nil {
+	if _, err := runLocalCommand(ctx, "", gitEnvironment, git.Path, "clone", "--no-checkout", value.RepositoryURL, directory); err != nil {
+		cleanup()
+		return preparedSource{}, errors.New("Git 仓库拉取失败，请检查仓库地址和凭据")
+	}
+	ref := value.RefValue
+	switch value.RefKind {
+	case project.RefBranch:
+		ref = "refs/remotes/origin/" + strings.TrimPrefix(ref, "refs/heads/")
+	case project.RefTag:
+		ref = "refs/tags/" + strings.TrimPrefix(ref, "refs/tags/")
+	}
+	revision, err := runLocalCommand(ctx, "", nil, git.Path, "-C", directory, "rev-parse", "--verify", "--end-of-options", ref+"^{commit}")
+	if err != nil {
+		cleanup()
+		return preparedSource{}, fmt.Errorf("解析 Git 引用 %s: %w", value.RefValue, err)
+	}
+	revision = strings.TrimSpace(revision)
+	if _, err := runLocalCommand(ctx, "", nil, git.Path, "-C", directory, "checkout", "--detach", revision); err != nil {
 		cleanup()
 		return preparedSource{}, fmt.Errorf("检出 Git 引用 %s: %w", value.RefValue, err)
 	}
-	revision, err := runLocalCommand(ctx, "", nil, git.Path, "-C", directory, "rev-parse", "HEAD")
-	if err != nil {
-		cleanup()
-		return preparedSource{}, err
-	}
-	return preparedSource{root: directory, revision: strings.TrimSpace(revision), cleanup: cleanup}, nil
+	return preparedSource{root: directory, revision: revision, cleanup: cleanup}, nil
 }
 
 func localSourceRevision(ctx context.Context, root string) string {
@@ -364,10 +388,20 @@ func (s *SystemService) deploymentReleaseHandler(ctx context.Context, task job.J
 		defer cancel()
 		if handlerErr != nil {
 			status := deployment.ReleaseFailed
+			detail := handlerErr.Error()
 			if errors.Is(handlerErr, context.Canceled) {
 				status = deployment.ReleaseCanceled
+				jobs, _, _, jobErr := s.readyState()
+				if jobErr == nil {
+					currentJob, jobErr := jobs.Get(finishContext, task.ID)
+					currentRelease, releaseErr := deployments.GetRelease(finishContext, payload.ReleaseID)
+					if jobErr == nil && !currentJob.CancelRequested && releaseErr == nil && currentRelease.BuildMode == deployment.BuildRemote && currentRelease.DeliveryCommit != "" {
+						status, detail = deployment.ReleaseFailed, deployment.InterruptedReleaseDetail
+						handlerErr = errors.New(detail)
+					}
+				}
 			}
-			_ = deployments.UpdateRelease(finishContext, payload.ReleaseID, status, handlerErr.Error(), "", "", "")
+			_ = deployments.UpdateRelease(finishContext, payload.ReleaseID, status, detail, "", "", "")
 		}
 	}()
 
@@ -428,22 +462,13 @@ func (s *SystemService) deploymentReleaseHandler(ctx context.Context, task job.J
 	if err != nil {
 		return err
 	}
-	if registryValue.Status != registry.StatusHealthy {
+	if target.BuildMode != deployment.BuildRemote && registryValue.Status != registry.StatusHealthy {
 		return errors.New("镜像仓库尚未通过连接检测")
 	}
-	registryPassword, err := loadRegistryPushPassword(ctx, registryValue)
+	registryPassword, err := s.registryPasswordForRelease(ctx, registryValue, target.BuildMode == deployment.BuildRemote)
 	if err != nil {
 		return err
 	}
-	docker, err := toolchain.ResolveExecutable(ctx, "docker")
-	if err != nil {
-		return err
-	}
-	buildProxy, err := s.prepareBuildProxy(ctx, docker.Path, registryValue, reporter)
-	if err != nil {
-		return err
-	}
-
 	if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleasePreparing, "正在准备源码", "", "", ""); err != nil {
 		return err
 	}
@@ -471,9 +496,29 @@ func (s *SystemService) deploymentReleaseHandler(ctx context.Context, task job.J
 	if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleaseBuilding, "正在构建镜像", "", source.revision, ""); err != nil {
 		return err
 	}
-	imageRef, manifest, err := buildAndPushRelease(ctx, source, projectValue, target, registryValue, registryPassword, release.Version, platform, basePath, buildProxy, reporter, func(status deployment.ReleaseStatus, detail string) error {
-		return deployments.UpdateRelease(ctx, release.ID, status, detail, "", source.revision, "")
-	})
+	var imageRef, manifest string
+	if target.BuildMode == deployment.BuildRemote {
+		latestTarget, targetErr := deployments.Get(ctx, target.ID)
+		if targetErr != nil {
+			return targetErr
+		}
+		if err := deployments.SetReleaseEnvironmentRevision(ctx, release.ID, latestTarget.EnvironmentRevision); err != nil {
+			return err
+		}
+		imageRef, manifest, err = s.buildRemoteRelease(ctx, deployments, release, source, projectValue, registryValue, target.WorkloadKind, target.WorkloadName, platform, basePath, task.ID, reporter)
+	} else {
+		docker, dockerErr := toolchain.ResolveExecutable(ctx, "docker")
+		if dockerErr != nil {
+			return dockerErr
+		}
+		buildProxy, proxyErr := s.prepareBuildProxy(ctx, docker.Path, registryValue, reporter)
+		if proxyErr != nil {
+			return proxyErr
+		}
+		imageRef, manifest, err = buildAndPushRelease(ctx, source, projectValue, target, registryValue, registryPassword, release.Version, platform, basePath, buildProxy, reporter, func(status deployment.ReleaseStatus, detail string) error {
+			return deployments.UpdateRelease(ctx, release.ID, status, detail, "", source.revision, "")
+		})
+	}
 	if err != nil {
 		return err
 	}
@@ -488,39 +533,24 @@ func (s *SystemService) deploymentReleaseHandler(ctx context.Context, task job.J
 		}
 	}
 	if target.WorkloadKind == "compose" {
-		if err := remote.UploadComposeWithAgent(ctx, host, target.ServerID, task.ID, target.ID, manifest); err != nil {
-			return err
-		}
-		if err := remote.PullComposeWithAgent(ctx, host, target.ServerID, task.ID, target.ID, target.WorkloadName, release.Version); err != nil {
-			return err
-		}
-		if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleaseDeploying, "正在更新 Compose 项目", imageRef, source.revision, manifest); err != nil {
-			return err
-		}
-		if err := remote.UpComposeWithAgent(ctx, host, target.ServerID, task.ID, target.ID, target.WorkloadName, release.Version); err != nil {
-			return err
-		}
-	} else {
-		if err := remote.PullImageWithAgent(ctx, host, target.ServerID, task.ID, imageRef); err != nil {
-			return err
-		}
-		runtimeImageRef, err := runtimeTaggedImageReference(imageRef, release.Version)
-		if err != nil {
-			return err
-		}
-		if err := remote.TagImageWithAgent(ctx, host, target.ServerID, task.ID, imageRef, runtimeImageRef); err != nil {
-			return fmt.Errorf("创建远端运行版本标签: %w", err)
-		}
-		reporter.Log("远端运行镜像标签：" + runtimeImageRef + "（制品仍按 Digest 锁定）")
-		if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleaseDeploying, "正在替换远端容器", imageRef, source.revision, manifest); err != nil {
-			return err
-		}
-		reporter.Progress(74, "正在创建或更新远端容器")
-		return s.deployAndCheckContainer(ctx, deployments, release, target, host, task.ID, reporter, remote, imageRef, runtimeImageRef, source.revision, manifest)
+		return s.deployAndCheckCompose(ctx, deployments, release, target, host, task.ID, reporter, remote, imageRef, source.revision, manifest, "正在更新 Compose 项目")
 	}
-	return s.finishReleaseHealthCheck(ctx, deployments, release, target, host, reporter, imageRef, source.revision, manifest, func() error {
-		return s.applyReleasePath(ctx, release.ID, task.ID, host)
-	})
+	if err := remote.PullImageWithAgent(ctx, host, target.ServerID, task.ID, imageRef); err != nil {
+		return err
+	}
+	runtimeImageRef, err := runtimeTaggedImageReference(imageRef, release.Version)
+	if err != nil {
+		return err
+	}
+	if err := remote.TagImageWithAgent(ctx, host, target.ServerID, task.ID, imageRef, runtimeImageRef); err != nil {
+		return fmt.Errorf("创建远端运行版本标签: %w", err)
+	}
+	reporter.Log("远端运行镜像标签：" + runtimeImageRef + "（制品仍按 Digest 锁定）")
+	if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleaseDeploying, "正在替换远端容器", imageRef, source.revision, manifest); err != nil {
+		return err
+	}
+	reporter.Progress(74, "正在创建或更新远端容器")
+	return s.deployAndCheckContainer(ctx, deployments, release, target, host, task.ID, reporter, remote, imageRef, runtimeImageRef, source.revision, manifest)
 }
 
 func (s *SystemService) deploymentRollbackHandler(ctx context.Context, task job.Job, reporter job.Reporter) error {
@@ -653,49 +683,31 @@ func (s *SystemService) deploymentArtifactHandler(ctx context.Context, task job.
 	}
 	reporter.Progress(30, progress)
 	if target.WorkloadKind == "compose" {
-		if source.Manifest == "" {
-			return errors.New("已有制品缺少 Compose 快照，无法部署")
-		}
-		if err := remote.UploadComposeWithAgent(ctx, host, target.ServerID, task.ID, target.ID, source.Manifest); err != nil {
-			return err
-		}
-		if err := remote.PullComposeWithAgent(ctx, host, target.ServerID, task.ID, target.ID, target.WorkloadName, source.Version); err != nil {
-			return err
-		}
 		deployDetail := "正在使用已有制品更新 Compose 项目"
 		if rollback {
 			deployDetail = "正在恢复历史 Compose 项目"
 		}
-		if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleaseDeploying, deployDetail, source.ImageRef, source.SourceRevision, source.Manifest); err != nil {
-			return err
-		}
-		if err := remote.UpComposeWithAgent(ctx, host, target.ServerID, task.ID, target.ID, target.WorkloadName, source.Version); err != nil {
-			return err
-		}
-	} else {
-		if err := remote.PullImageWithAgent(ctx, host, target.ServerID, task.ID, source.ImageRef); err != nil {
-			return err
-		}
-		runtimeImageRef, err := runtimeTaggedImageReference(source.ImageRef, source.Version)
-		if err != nil {
-			return err
-		}
-		if err := remote.TagImageWithAgent(ctx, host, target.ServerID, task.ID, source.ImageRef, runtimeImageRef); err != nil {
-			return fmt.Errorf("创建远端运行版本标签: %w", err)
-		}
-		reporter.Log("远端运行镜像标签：" + runtimeImageRef + "（制品仍按 Digest 锁定）")
-		deployDetail := "正在使用已有制品替换远端容器"
-		if rollback {
-			deployDetail = "正在恢复历史容器"
-		}
-		if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleaseDeploying, deployDetail, source.ImageRef, source.SourceRevision, source.Manifest); err != nil {
-			return err
-		}
-		return s.deployAndCheckContainer(ctx, deployments, release, target, host, task.ID, reporter, remote, source.ImageRef, runtimeImageRef, source.SourceRevision, source.Manifest)
+		return s.deployAndCheckCompose(ctx, deployments, release, target, host, task.ID, reporter, remote, source.ImageRef, source.SourceRevision, source.Manifest, deployDetail)
 	}
-	return s.finishReleaseHealthCheck(ctx, deployments, release, target, host, reporter, source.ImageRef, source.SourceRevision, source.Manifest, func() error {
-		return s.applyReleasePath(ctx, release.ID, task.ID, host)
-	})
+	if err := remote.PullImageWithAgent(ctx, host, target.ServerID, task.ID, source.ImageRef); err != nil {
+		return err
+	}
+	runtimeImageRef, err := runtimeTaggedImageReference(source.ImageRef, source.Version)
+	if err != nil {
+		return err
+	}
+	if err := remote.TagImageWithAgent(ctx, host, target.ServerID, task.ID, source.ImageRef, runtimeImageRef); err != nil {
+		return fmt.Errorf("创建远端运行版本标签: %w", err)
+	}
+	reporter.Log("远端运行镜像标签：" + runtimeImageRef + "（制品仍按 Digest 锁定）")
+	deployDetail := "正在使用已有制品替换远端容器"
+	if rollback {
+		deployDetail = "正在恢复历史容器"
+	}
+	if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleaseDeploying, deployDetail, source.ImageRef, source.SourceRevision, source.Manifest); err != nil {
+		return err
+	}
+	return s.deployAndCheckContainer(ctx, deployments, release, target, host, task.ID, reporter, remote, source.ImageRef, runtimeImageRef, source.SourceRevision, source.Manifest)
 }
 
 func (s *SystemService) deployAndCheckContainer(ctx context.Context, deployments *deployment.Store, release deployment.Release, target deployment.Target, host server.Connection, jobID string, reporter job.Reporter, remote *server.Remote, imageRef, runtimeImageRef, revision, manifest string) error {
@@ -777,57 +789,59 @@ func (s *SystemService) finishReleaseHealthCheck(ctx context.Context, deployment
 		return err
 	}
 	reporter.Progress(86, "正在检查远端服务健康状态")
-	remote := server.NewRemote()
-	deadline := time.Now().Add(90 * time.Second)
-	var lastDetail string
-	for {
-		containers, err := remote.ListContainers(ctx, host)
-		if err != nil {
-			return fmt.Errorf("健康检查无法读取容器: %w", err)
-		}
-		matched := deployment.Match(target, containers)
-		if len(matched) > 0 {
-			healthy := true
-			for _, container := range matched {
-				if container.State != "running" || container.Health == "unhealthy" {
-					healthy = false
-					lastDetail = fmt.Sprintf("%s: %s / %s", container.Name, container.State, container.Health)
-					break
-				}
-				if container.Health == "starting" {
-					healthy = false
-					lastDetail = container.Name + ": 健康检查启动中"
-					break
-				}
-			}
-			if healthy {
-				if onHealthy != nil {
-					if err := onHealthy(); err != nil {
-						return fmt.Errorf("发布收尾失败: %w", err)
-					}
-				}
-				if err := deployments.SaveSnapshot(ctx, host.ID, containers); err != nil {
-					return err
-				}
-				detail := fmt.Sprintf("发布成功，%d 个容器运行正常", len(matched))
-				if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleaseSucceeded, detail, imageRef, revision, manifest); err != nil {
-					return err
-				}
-				reporter.Progress(98, detail)
-				return nil
-			}
-		} else {
-			lastDetail = "尚未发现发布后的容器"
-		}
-		if time.Now().After(deadline) {
-			return errors.New("健康检查超时: " + lastDetail)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(3 * time.Second):
+	containers, count, err := waitReleaseHealth(ctx, server.NewRemote(), host, target)
+	if err != nil {
+		return err
+	}
+	if onHealthy != nil {
+		if err := onHealthy(); err != nil {
+			return fmt.Errorf("发布收尾失败: %w", err)
 		}
 	}
+	if err := deployments.SaveSnapshot(ctx, host.ID, containers); err != nil {
+		return err
+	}
+	detail := fmt.Sprintf("发布成功，%d 个容器运行正常", count)
+	if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleaseSucceeded, detail, imageRef, revision, manifest); err != nil {
+		return err
+	}
+	reporter.Progress(98, detail)
+	return nil
+}
+
+func waitReleaseHealth(ctx context.Context, remote *server.Remote, host server.Connection, target deployment.Target) ([]server.Container, int, error) {
+	checkCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+	for {
+		containers, err := remote.ListContainers(checkCtx, host)
+		if err != nil {
+			return nil, 0, fmt.Errorf("健康检查无法读取容器: %w", err)
+		}
+		matched := deployment.Match(target, containers)
+		if detail := releaseHealthIssue(matched); detail != "" {
+			select {
+			case <-checkCtx.Done():
+				return nil, 0, fmt.Errorf("健康检查未通过: %s: %w", detail, checkCtx.Err())
+			case <-ticker.C:
+			}
+			continue
+		}
+		return containers, len(matched), nil
+	}
+}
+
+func releaseHealthIssue(containers []server.Container) string {
+	if len(containers) == 0 {
+		return "尚未发现发布后的容器"
+	}
+	for _, container := range containers {
+		if container.State != "running" || container.Health == "unhealthy" || container.Health == "starting" {
+			return fmt.Sprintf("%s: %s / %s", container.Name, container.State, container.Health)
+		}
+	}
+	return ""
 }
 
 func (s *SystemService) cacheDirectory() string {

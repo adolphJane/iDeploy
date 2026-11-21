@@ -355,6 +355,10 @@ func withReadOnly(ctx context.Context, connection Connection, password string, o
 }
 
 func open(connection Connection, password string) (*sql.DB, error) {
+	return openWithReadTimeout(connection, password, 15*time.Second)
+}
+
+func openWithReadTimeout(connection Connection, password string, readTimeout time.Duration) (*sql.DB, error) {
 	var driver, dsn string
 	switch connection.Driver {
 	case DriverPostgres:
@@ -371,7 +375,7 @@ func open(connection Connection, password string) (*sql.DB, error) {
 		config.DBName = connection.DatabaseName
 		config.ParseTime = true
 		config.Timeout = 5 * time.Second
-		config.ReadTimeout = 15 * time.Second
+		config.ReadTimeout = readTimeout
 		config.WriteTimeout = 15 * time.Second
 		if connection.SSLMode == "require" {
 			config.TLSConfig = "true"

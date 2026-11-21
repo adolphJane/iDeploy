@@ -12,7 +12,7 @@ import (
 
 func (s *Store) ListEnvironment(ctx context.Context, deploymentID string) ([]EnvironmentVariable, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id,deployment_id,name,kind,plain_value,credential_ref,created_at,updated_at
+		SELECT id,deployment_id,name,kind,plain_value,credential_ref,build_secret,created_at,updated_at
 		FROM deployment_environment_variables WHERE deployment_id=? ORDER BY name
 	`, deploymentID)
 	if err != nil {
@@ -79,11 +79,14 @@ func (s *Store) ApplyEnvironmentChanges(ctx context.Context, deploymentID string
 		if change.Kind == EnvironmentKindSecret && change.CredentialRef == "" {
 			return nil, nil, fmt.Errorf("秘密变量 %s 尚未安全保存", name)
 		}
+		if change.BuildSecret && change.Kind != EnvironmentKindSecret {
+			return nil, nil, fmt.Errorf("构建秘密 %s 必须使用秘密值类型", name)
+		}
 		if change.Kind == EnvironmentKindPlain {
 			change.CredentialRef = ""
 		}
 		current, found := byName[name]
-		if found && current.Kind == change.Kind && current.PlainValue == change.PlainValue && current.CredentialRef == change.CredentialRef {
+		if found && current.Kind == change.Kind && current.PlainValue == change.PlainValue && current.CredentialRef == change.CredentialRef && current.BuildSecret == change.BuildSecret {
 			continue
 		}
 		id := change.ID
@@ -102,11 +105,11 @@ func (s *Store) ApplyEnvironmentChanges(ctx context.Context, deploymentID string
 			}
 		}
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO deployment_environment_variables(id,deployment_id,name,kind,plain_value,credential_ref,created_at,updated_at)
-			VALUES(?,?,?,?,?,?,?,?)
+			INSERT INTO deployment_environment_variables(id,deployment_id,name,kind,plain_value,credential_ref,build_secret,created_at,updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(deployment_id,name) DO UPDATE SET
-				kind=excluded.kind,plain_value=excluded.plain_value,credential_ref=excluded.credential_ref,updated_at=excluded.updated_at
-		`, id, deploymentID, name, change.Kind, change.PlainValue, change.CredentialRef, createdAt, now)
+				kind=excluded.kind,plain_value=excluded.plain_value,credential_ref=excluded.credential_ref,build_secret=excluded.build_secret,updated_at=excluded.updated_at
+		`, id, deploymentID, name, change.Kind, change.PlainValue, change.CredentialRef, change.BuildSecret, createdAt, now)
 		if err != nil {
 			return nil, nil, fmt.Errorf("save deployment environment variable %s: %w", name, err)
 		}
@@ -240,7 +243,7 @@ func (s *Store) AllEnvironmentCredentialRefs(ctx context.Context) ([]string, err
 }
 
 func listEnvironmentTx(ctx context.Context, tx *sql.Tx, deploymentID string) ([]EnvironmentVariable, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id,deployment_id,name,kind,plain_value,credential_ref,created_at,updated_at FROM deployment_environment_variables WHERE deployment_id=?`, deploymentID)
+	rows, err := tx.QueryContext(ctx, `SELECT id,deployment_id,name,kind,plain_value,credential_ref,build_secret,created_at,updated_at FROM deployment_environment_variables WHERE deployment_id=?`, deploymentID)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +263,7 @@ func listEnvironmentTx(ctx context.Context, tx *sql.Tx, deploymentID string) ([]
 func scanEnvironmentVariable(row scanner) (EnvironmentVariable, error) {
 	var value EnvironmentVariable
 	var createdAt, updatedAt string
-	if err := row.Scan(&value.ID, &value.DeploymentID, &value.Name, &value.Kind, &value.PlainValue, &value.CredentialRef, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&value.ID, &value.DeploymentID, &value.Name, &value.Kind, &value.PlainValue, &value.CredentialRef, &value.BuildSecret, &createdAt, &updatedAt); err != nil {
 		return EnvironmentVariable{}, err
 	}
 	var err error

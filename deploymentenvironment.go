@@ -13,9 +13,10 @@ import (
 )
 
 type DeploymentEnvironmentVariableInput struct {
-	Name  string `json:"name"`
-	Kind  string `json:"kind"`
-	Value string `json:"value,omitempty"`
+	Name        string `json:"name"`
+	Kind        string `json:"kind"`
+	Value       string `json:"value,omitempty"`
+	BuildSecret bool   `json:"buildSecret"`
 }
 
 type DeploymentEnvironmentUpdateInput struct {
@@ -30,10 +31,11 @@ type DeploymentSecretPromptInput struct {
 }
 
 type DeploymentEnvironmentVariableView struct {
-	Name       string `json:"name"`
-	Kind       string `json:"kind"`
-	Value      string `json:"value,omitempty"`
-	Configured bool   `json:"configured"`
+	Name        string `json:"name"`
+	Kind        string `json:"kind"`
+	Value       string `json:"value,omitempty"`
+	Configured  bool   `json:"configured"`
+	BuildSecret bool   `json:"buildSecret"`
 }
 
 type DeploymentEnvironmentView struct {
@@ -88,8 +90,9 @@ func (s *SystemService) UpdateDeploymentEnvironment(input DeploymentEnvironmentU
 	if err != nil {
 		return DeploymentEnvironmentView{}, err
 	}
-	if target.WorkloadKind != "container" {
-		return DeploymentEnvironmentView{}, errors.New("当前版本只支持单容器部署环境变量")
+	composeBuildOnly := target.WorkloadKind == "compose" && target.BuildMode == deployment.BuildRemote
+	if target.WorkloadKind != "container" && !composeBuildOnly {
+		return DeploymentEnvironmentView{}, errors.New("当前部署类型不支持环境变量配置")
 	}
 	existing, err := store.ListEnvironment(ctx, target.ID)
 	if err != nil {
@@ -103,6 +106,10 @@ func (s *SystemService) UpdateDeploymentEnvironment(input DeploymentEnvironmentU
 	changes := make([]deployment.EnvironmentChange, 0, len(input.Variables))
 	newSecretRefs := make([]string, 0)
 	for _, variable := range input.Variables {
+		if composeBuildOnly && (variable.Kind != deployment.EnvironmentKindSecret || !variable.BuildSecret) {
+			cleanupEnvironmentSecrets(ctx, newSecretRefs)
+			return DeploymentEnvironmentView{}, errors.New("远端 Compose 只支持 BuildKit 构建秘密")
+		}
 		name, err := deployment.ValidateEnvironmentName(variable.Name)
 		if err != nil {
 			cleanupEnvironmentSecrets(ctx, newSecretRefs)
@@ -117,6 +124,10 @@ func (s *SystemService) UpdateDeploymentEnvironment(input DeploymentEnvironmentU
 			return DeploymentEnvironmentView{}, fmt.Errorf("环境变量 %s 不能同时更新和删除", name)
 		}
 		kind := strings.TrimSpace(variable.Kind)
+		if variable.BuildSecret && kind != deployment.EnvironmentKindSecret {
+			cleanupEnvironmentSecrets(ctx, newSecretRefs)
+			return DeploymentEnvironmentView{}, fmt.Errorf("构建秘密 %s 必须使用秘密值类型", name)
+		}
 		if kind == deployment.EnvironmentKindPlain {
 			changes = append(changes, deployment.EnvironmentChange{Name: name, Kind: kind, PlainValue: variable.Value})
 			continue
@@ -131,7 +142,7 @@ func (s *SystemService) UpdateDeploymentEnvironment(input DeploymentEnvironmentU
 				cleanupEnvironmentSecrets(ctx, newSecretRefs)
 				return DeploymentEnvironmentView{}, fmt.Errorf("秘密变量 %s 尚未填写", name)
 			}
-			changes = append(changes, deployment.EnvironmentChange{ID: current.ID, Name: name, Kind: kind, CredentialRef: current.CredentialRef})
+			changes = append(changes, deployment.EnvironmentChange{ID: current.ID, Name: name, Kind: kind, CredentialRef: current.CredentialRef, BuildSecret: variable.BuildSecret})
 			continue
 		}
 		id, err := deployment.NewEnvironmentVariableID()
@@ -145,7 +156,7 @@ func (s *SystemService) UpdateDeploymentEnvironment(input DeploymentEnvironmentU
 			return DeploymentEnvironmentView{}, fmt.Errorf("秘密变量 %s 保存失败: %w", name, err)
 		}
 		newSecretRefs = append(newSecretRefs, ref)
-		changes = append(changes, deployment.EnvironmentChange{ID: id, Name: name, Kind: kind, CredentialRef: ref})
+		changes = append(changes, deployment.EnvironmentChange{ID: id, Name: name, Kind: kind, CredentialRef: ref, BuildSecret: variable.BuildSecret})
 	}
 
 	values, staleRefs, err := store.ApplyEnvironmentChanges(ctx, target.ID, changes, input.Remove)
@@ -198,9 +209,28 @@ end run`
 	if secret == "" {
 		return DeploymentEnvironmentView{}, errors.New("秘密值不能为空")
 	}
+	store, err := s.deploymentStore()
+	if err != nil {
+		return DeploymentEnvironmentView{}, err
+	}
+	target, err := store.Get(ctx, input.DeploymentID)
+	if err != nil {
+		return DeploymentEnvironmentView{}, err
+	}
+	buildSecret := target.WorkloadKind == "compose"
+	if variables, listErr := store.ListEnvironment(ctx, target.ID); listErr == nil {
+		for _, variable := range variables {
+			if variable.Name == name {
+				buildSecret = buildSecret || variable.BuildSecret
+				break
+			}
+		}
+	} else {
+		return DeploymentEnvironmentView{}, listErr
+	}
 	return s.UpdateDeploymentEnvironment(DeploymentEnvironmentUpdateInput{
 		DeploymentID: input.DeploymentID,
-		Variables:    []DeploymentEnvironmentVariableInput{{Name: name, Kind: deployment.EnvironmentKindSecret, Value: secret}},
+		Variables:    []DeploymentEnvironmentVariableInput{{Name: name, Kind: deployment.EnvironmentKindSecret, Value: secret, BuildSecret: buildSecret}},
 	})
 }
 
@@ -232,7 +262,7 @@ func deploymentEnvironmentView(target deployment.Target, values []deployment.Env
 		Variables:       make([]DeploymentEnvironmentVariableView, 0, len(values)),
 	}
 	for _, value := range values {
-		view := DeploymentEnvironmentVariableView{Name: value.Name, Kind: value.Kind, Configured: value.Kind == deployment.EnvironmentKindPlain || value.CredentialRef != ""}
+		view := DeploymentEnvironmentVariableView{Name: value.Name, Kind: value.Kind, Configured: value.Kind == deployment.EnvironmentKindPlain || value.CredentialRef != "", BuildSecret: value.BuildSecret}
 		if value.Kind == deployment.EnvironmentKindPlain {
 			view.Value = value.PlainValue
 		}

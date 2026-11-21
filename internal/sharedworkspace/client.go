@@ -21,6 +21,15 @@ type Client struct {
 	token string
 }
 
+type HTTPStatusError struct {
+	Code    int
+	Message string
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("共享服务返回 %d：%s", e.Code, e.Message)
+}
+
 func NewClient(connection server.Connection, token string) (*Client, error) {
 	if token == "" {
 		return nil, errors.New("此设备尚未取得共享服务访问令牌")
@@ -70,7 +79,7 @@ func (c *Client) request(ctx context.Context, method, path string, input, output
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		message, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("共享服务返回 %d：%s", resp.StatusCode, strings.TrimSpace(string(message)))
+		return &HTTPStatusError{Code: resp.StatusCode, Message: strings.TrimSpace(string(message))}
 	}
 	if output == nil {
 		return nil
@@ -82,6 +91,46 @@ type WorkspaceInfo struct {
 	APIVersion int    `json:"apiVersion"`
 	Name       string `json:"name"`
 	Revision   int64  `json:"revision"`
+}
+
+type RemoteReleaseJob struct {
+	ID             string `json:"id"`
+	RequestID      string `json:"requestId"`
+	DeploymentID   string `json:"deploymentId"`
+	ReleaseID      string `json:"releaseId"`
+	DeliveryCommit string `json:"deliveryCommit"`
+	DeliveryDigest string `json:"deliveryDigest"`
+	RepositoryURL  string `json:"repositoryUrl"`
+	Version        string `json:"version"`
+	RegistryID     string `json:"registryId"`
+	RegistryHost   string `json:"registryHost"`
+	RegistryUser   string `json:"registryUser"`
+	ImageRef       string `json:"imageRef"`
+	Manifest       string `json:"manifest"`
+	Status         string `json:"status"`
+	Stage          string `json:"stage"`
+}
+
+func (c *Client) CreateRemoteRelease(ctx context.Context, input RemoteReleaseJob) (RemoteReleaseJob, error) {
+	var result RemoteReleaseJob
+	err := c.request(ctx, http.MethodPost, "/v3/releases", input, &result)
+	return result, err
+}
+
+func (c *Client) RemoteRelease(ctx context.Context, id string) (RemoteReleaseJob, error) {
+	var result RemoteReleaseJob
+	err := c.request(ctx, http.MethodGet, "/v3/releases/"+url.PathEscape(id), nil, &result)
+	return result, err
+}
+
+func (c *Client) RemoteReleaseByRequest(ctx context.Context, requestID string) (RemoteReleaseJob, error) {
+	var result RemoteReleaseJob
+	err := c.request(ctx, http.MethodGet, "/v3/releases/by-request/"+url.PathEscape(requestID), nil, &result)
+	return result, err
+}
+
+func (c *Client) CancelRemoteRelease(ctx context.Context, requestID string) error {
+	return c.request(ctx, http.MethodDelete, "/v3/releases/by-request/"+url.PathEscape(requestID), nil, nil)
 }
 
 type RemoteResource struct {

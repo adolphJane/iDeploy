@@ -16,6 +16,7 @@ import (
 	"ideploy/internal/databasebrowser"
 	"ideploy/internal/deployment"
 	"ideploy/internal/domain"
+	"ideploy/internal/gitauth"
 	"ideploy/internal/registry"
 	"ideploy/internal/server"
 	"ideploy/internal/sharedworkspace"
@@ -550,6 +551,12 @@ func loadPortableSecret(ctx context.Context, ref string) (string, error) {
 		return domain.LoadDNSSecret(ctx, ref)
 	case strings.HasPrefix(ref, "keychain:deployment-environment:"):
 		return deployment.LoadEnvironmentSecret(ctx, ref)
+	case strings.HasPrefix(ref, "keychain:git-project:"):
+		value, err := gitauth.Load(ctx, ref)
+		if err != nil {
+			return "", err
+		}
+		return gitauth.Encode(value)
 	default:
 		return "", errors.New("unsupported credential reference")
 	}
@@ -633,7 +640,11 @@ func (s *SystemService) savePortableSecret(ctx context.Context, secretID, value 
 		case "r.build_configs:build_args_json":
 			table, column = "build_configs", "build_args_json"
 		case "r.releases:manifest":
-			table, column = "deployment_releases", "manifest"
+			store, err := s.deploymentStore()
+			if err != nil {
+				return err
+			}
+			return store.SetManifest(ctx, id, value)
 		case "r.env:plain_value":
 			table, column = "deployment_environment_variables", "plain_value"
 		case "r.dns_connections:access_key_id":
@@ -646,6 +657,22 @@ func (s *SystemService) savePortableSecret(ctx context.Context, secretID, value 
 		return err
 	}
 	switch kind {
+	case "r.project_sources":
+		ref := gitauth.Ref(id)
+		if value == "" {
+			_ = gitauth.Delete(ctx, ref)
+			_, err := s.db.ExecContext(ctx, `UPDATE project_sources SET credential_ref='' WHERE project_id=?`, id)
+			return err
+		}
+		credential, err := gitauth.Decode(value)
+		if err != nil {
+			return err
+		}
+		if err := gitauth.Save(ctx, ref, credential); err != nil {
+			return err
+		}
+		_, err = s.db.ExecContext(ctx, `UPDATE project_sources SET credential_ref=? WHERE project_id=?`, ref, id)
+		return err
 	case "r.servers":
 		var method string
 		if err := s.db.QueryRowContext(ctx, `SELECT auth_method FROM servers WHERE id=?`, id).Scan(&method); err != nil && !(errors.Is(err, sql.ErrNoRows) && value == "") {

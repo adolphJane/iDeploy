@@ -3,7 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
 	"time"
+
+	"ideploy/internal/deployment"
+	"ideploy/internal/sharedworkspace"
 )
 
 // A shared publication holds the server-wide lease for the entire job. The
@@ -22,6 +26,10 @@ func (s *SystemService) leaseSharedPublication(ctx context.Context, serverID, re
 	}
 	leaseID := "server:" + serverID
 	if err := client.AcquireLease(ctx, leaseID, requestID); err != nil {
+		var statusError *sharedworkspace.HTTPStatusError
+		if errors.As(err, &statusError) && statusError.Code == http.StatusConflict {
+			return nil, nil, errors.New(deployment.PublicationLeaseBusyDetail)
+		}
 		return nil, nil, err
 	}
 	jobCtx, cancel := context.WithCancel(ctx)

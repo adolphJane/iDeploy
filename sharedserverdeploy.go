@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -40,6 +41,18 @@ func (s *SystemService) GetSharedServerStatus(serverID string) (server.SharedSer
 		return server.SharedServerState{}, err
 	}
 	return server.NewRemote().PreflightSharedServer(ctx, connection)
+}
+
+func (s *SystemService) checkRemoteBuildWorker(ctx context.Context, serverID string, compose bool) error {
+	servers, err := s.serverStore()
+	if err != nil {
+		return err
+	}
+	connection, err := servers.Get(ctx, serverID)
+	if err != nil {
+		return err
+	}
+	return server.NewRemote().CheckBuildWorker(ctx, connection, compose)
 }
 
 func (s *SystemService) PlanSharedServerDeployment(serverID, databaseID, databaseName string, skipTLSVerify bool) (SharedServerDeploymentPlan, error) {
@@ -211,7 +224,9 @@ func (s *SystemService) sharedServerDeployHandler(ctx context.Context, task job.
 		reporter.Log("已保存共享服务数据库备份：" + backupPath)
 	}
 	reporter.Progress(30, "上传服务程序并构建镜像")
-	if err = remote.DeploySharedServer(ctx, connection, p.Architecture, server.SharedServerDatabase{Host: database.Host, Port: database.Port, Name: p.DatabaseName, User: database.Username, Password: password, SkipTLSVerify: p.SkipTLSVerify}, token); err != nil {
+	workerTokenBytes := sha256.Sum256([]byte("ideploy-worker-v1:" + token))
+	workerToken := hex.EncodeToString(workerTokenBytes[:])
+	if err = remote.DeploySharedServer(ctx, connection, p.Architecture, server.SharedServerDatabase{Host: database.Host, Port: database.Port, Name: p.DatabaseName, User: database.Username, Password: password, SkipTLSVerify: p.SkipTLSVerify}, token, workerToken); err != nil {
 		return err
 	}
 	reporter.Progress(100, "共享服务已部署，远程 MySQL 健康检查通过")

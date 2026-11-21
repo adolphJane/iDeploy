@@ -55,6 +55,7 @@ final class AppModel: ObservableObject {
     @Published var sharedUpToDate = false
     @Published var sharedLastSyncAt = ""
     @Published var sharedSyncDetail = ""
+    @Published var sharedSyncInProgress = false
     @Published var openSharedSettings = false
 
     func refreshFromUser() async -> Bool {
@@ -73,7 +74,9 @@ final class AppModel: ObservableObject {
         if ready { return }
         for _ in 0..<40 {
             do {
-                _ = try await NativeBridge.call("GetOverview")
+                // A local database read confirms the backend is ready without
+                // waiting for overview work or the remote shared service.
+                projects = try await NativeBridge.call("ListProjects").array
                 ready = true
                 await refresh()
                 return
@@ -88,11 +91,25 @@ final class AppModel: ObservableObject {
     func refresh() async -> Bool {
         busy = true
         defer { busy = false }
+        let loaded = await loadLocalData()
+        let shared = await refreshSharedWorkspace()
+        if shared {
+            // Sync may have applied remote changes to the local database.
+            return await loadLocalData()
+        }
+        return loaded
+    }
+
+    private func refreshSharedWorkspace() async -> Bool {
+        sharedSyncInProgress = true
+        defer { sharedSyncInProgress = false }
+        var shared = false
         do {
             let status = try await NativeBridge.call("GetSharedWorkspaceStatus")
             sharedMode = status["mode"].string
             sharedUnlocked = status["unlocked"].bool
             if sharedMode == "shared" {
+                shared = true
                 if sharedUnlocked {
                     let next = try await NativeBridge.call("ReconcileSharedWorkspace", timeoutSeconds: 120)
                     sharedCursor = next["cursor"].int
@@ -114,24 +131,20 @@ final class AppModel: ObservableObject {
             sharedSyncError = error.localizedDescription
             sharedUpToDate = false
         }
+        return shared
+    }
+
+    private func loadLocalData() async -> Bool {
         for attempt in 0..<16 {
             do {
-                let nextOverview = try await NativeBridge.call("GetOverview")
-                let nextDeployments = try await NativeBridge.call("ListDeployments").array
-                let nextServers = try await NativeBridge.call("ListServers").array
-                let nextDomains = try await NativeBridge.call("ListDomains").array
-                let nextDNSConnections = try await NativeBridge.call("ListDNSConnections").array
-                let nextProjects = try await NativeBridge.call("ListProjects").array
-                let nextRegistries = try await NativeBridge.call("ListRegistries").array
-                let nextDatabases = try await NativeBridge.call("ListDatabaseConnections").array
-                overview = nextOverview
-                deployments = nextDeployments
-                servers = nextServers
-                domains = nextDomains
-                dnsConnections = nextDNSConnections
-                projects = nextProjects
-                registries = nextRegistries
-                databases = nextDatabases
+                deployments = try await NativeBridge.call("ListDeployments").array
+                servers = try await NativeBridge.call("ListServers").array
+                domains = try await NativeBridge.call("ListDomains").array
+                dnsConnections = try await NativeBridge.call("ListDNSConnections").array
+                projects = try await NativeBridge.call("ListProjects").array
+                registries = try await NativeBridge.call("ListRegistries").array
+                databases = try await NativeBridge.call("ListDatabaseConnections").array
+                overview = try await NativeBridge.call("GetOverview")
                 return true
             } catch {
                 let retryable = (error as? BridgeError).map {

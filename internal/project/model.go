@@ -43,6 +43,7 @@ type Project struct {
 	SourceKind      SourceKind
 	LocalPath       string
 	RepositoryURL   string
+	CredentialRef   string
 	RefKind         RefKind
 	RefValue        string
 	ResolvedCommit  string

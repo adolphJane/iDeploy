@@ -14,19 +14,20 @@ import (
 // GitStatus describes a local Git worktree. Ahead/behind is based on the
 // locally recorded upstream ref unless refreshRemote is explicitly requested.
 type GitStatus struct {
-	Available    bool   `json:"available"`
-	Detail       string `json:"detail"`
-	Root         string `json:"root"`
-	Branch       string `json:"branch"`
-	Head         string `json:"head"`
-	Upstream     string `json:"upstream"`
-	ChangedFiles int    `json:"changedFiles"`
-	StagedFiles  int    `json:"stagedFiles"`
-	Untracked    int    `json:"untracked"`
-	Ahead        int    `json:"ahead"`
-	Behind       int    `json:"behind"`
-	RemoteFresh  bool   `json:"remoteFresh"`
-	CheckedAt    string `json:"checkedAt"`
+	Available       bool   `json:"available"`
+	Detail          string `json:"detail"`
+	Root            string `json:"root"`
+	Branch          string `json:"branch"`
+	Head            string `json:"head"`
+	Upstream        string `json:"upstream"`
+	ChangedFiles    int    `json:"changedFiles"`
+	StagedFiles     int    `json:"stagedFiles"`
+	Untracked       int    `json:"untracked"`
+	Ahead           int    `json:"ahead"`
+	Behind          int    `json:"behind"`
+	RemoteFresh     bool   `json:"remoteFresh"`
+	DivergenceKnown bool   `json:"-"`
+	CheckedAt       string `json:"checkedAt"`
 }
 
 func InspectGit(ctx context.Context, directory string, refreshRemote bool) GitStatus {
@@ -95,6 +96,7 @@ func InspectGit(ctx context.Context, directory string, refreshRemote bool) GitSt
 	}
 	result.Ahead, _ = strconv.Atoi(fields[0])
 	result.Behind, _ = strconv.Atoi(fields[1])
+	result.DivergenceKnown = true
 	if result.Detail == "" && !result.RemoteFresh {
 		result.Detail = "远端差异依据本机上次获取的记录；点击“检查远端更新”可获取最新状态"
 	}
