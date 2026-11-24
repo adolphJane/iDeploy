@@ -12,6 +12,7 @@ struct DNSRecordsView: View {
     let domain: J
     @State private var records: [J] = []
     @State private var hosts: [J] = []
+    @State private var internalIngresses: [J] = []
     @State private var bindingError: String?
     @State private var loading = false
     @State private var errorMessage: String?
@@ -74,15 +75,20 @@ struct DNSRecordsView: View {
                             let matchedHost = hosts.first { $0["fqdn"].string == record["fqdn"].string }
                             let binding = matchedHost?["binding"] ?? J(nil)
                             let external = matchedHost?["externalRoute"] ?? J(nil)
-                            let serviceState = domainBindingState(external.isNull ? binding : external)
+                            let ingress = internalIngresses.first { $0["fqdn"].string == record["fqdn"].string } ?? J(nil)
+                            let ingressState = internalIngressRecordState(ingress)
+                            let serviceState = binding.isNull && external.isNull && !ingress.isNull
+                                ? (title: ingressState.title, tone: ingressState.tone)
+                                : domainBindingState(external.isNull ? binding : external)
                             DomainDNSRecordRow(hostRecord: record["rr"].string,
                                                name: dnsRecordDisplayName(record, domain: domain), type: record["type"].string,
                                                value: record["value"].string, ttl: record["ttl"].int,
                                                status: dnsRecordStatusText(record, provider: provider),
                                                statusTone: dnsRecordStatusTone(record, provider: provider),
-                                               serviceSummary: external.isNull
-                                                ? domainBindingSummary(binding, deployments: model.deployments)
-                                                : "服务器服务 · \(external["hostIp"].string):\(external["hostPort"].string) · \(external["certificatePath"].string.isEmpty ? "HTTP" : "HTTPS")",
+                                               serviceSummary: !external.isNull
+                                                ? "服务器服务 · \(external["hostIp"].string):\(external["hostPort"].string) · \(external["certificatePath"].string.isEmpty ? "HTTP" : "HTTPS")"
+                                                : !binding.isNull ? domainBindingSummary(binding, deployments: model.deployments)
+                                                : ingress.isNull ? "" : ingressState.summary,
                                                serviceStatus: serviceState.title, serviceTone: serviceState.tone) {
                                 HStack(spacing: AppSpacing.xs) {
                                     Button(binding.isNull && external.isNull ? "服务绑定" : "管理绑定") { bindingRecord = record }
@@ -151,6 +157,7 @@ struct DNSRecordsView: View {
         bindingError = nil
         Task {
             async let fetchedHosts = NativeBridge.call("ListDomainHosts", [domain.id])
+            async let fetchedIngresses = NativeBridge.call("ListInternalIngresses")
             do {
                 let result = try await NativeBridge.call("ListDNSRecords", [domain.id])
                 guard loadSequence == sequence else { return }
@@ -164,6 +171,9 @@ struct DNSRecordsView: View {
                     guard loadSequence == sequence else { return }
                     bindingError = error.localizedDescription
                 }
+                let ingressResult = try? await fetchedIngresses
+                guard loadSequence == sequence else { return }
+                internalIngresses = ingressResult?.array ?? []
             } catch {
                 guard loadSequence == sequence else { return }
                 errorMessage = error.localizedDescription

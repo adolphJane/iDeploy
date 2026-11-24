@@ -164,6 +164,15 @@ func domainBindingSummary(_ binding: J, deployments: [J]) -> String {
     return "\(target) · HTTP 后端 :\(String(binding["containerPort"].int)) · \(access)"
 }
 
+func internalIngressRecordState(_ ingress: J) -> (title: String, summary: String, tone: AppStatusBadge.Tone) {
+    switch ingress["status"].string {
+    case "ready": return ("入口已就绪", "应用入口 · HTTPS", .success)
+    case "applying": return ("入口部署中", "应用入口 · HTTPS", .warning)
+    case "failed": return ("入口部署失败", "应用入口 · HTTPS", .danger)
+    default: return ("入口草稿", "应用入口 · 待部署", .warning)
+    }
+}
+
 struct DomainServiceAccessRow<Actions: View>: View {
     let name: String
     let source: String

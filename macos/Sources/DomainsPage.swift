@@ -23,6 +23,7 @@ struct DomainsPage: View {
     @EnvironmentObject private var model: AppModel
     @State private var selectedID: String?
     @State private var hosts: [J] = []
+    @State private var internalIngresses: [J] = []
     @State private var search = ""
     @State private var loading = false
     @State private var hostsError: String?
@@ -191,12 +192,16 @@ struct DomainsPage: View {
                                 let name = dnsRecordDisplayName(record, domain: domain)
                                 let linkedHost = hosts.first { $0["fqdn"].string == record["fqdn"].string }
                                 let binding = linkedHost?["binding"] ?? J(nil)
-                                let serviceState = domainBindingState(binding)
+                                let ingress = internalIngresses.first { $0["fqdn"].string == record["fqdn"].string } ?? J(nil)
+                                let ingressState = internalIngressRecordState(ingress)
+                                let serviceState = binding.isNull && !ingress.isNull
+                                    ? (title: ingressState.title, tone: ingressState.tone) : domainBindingState(binding)
                                 DomainDNSRecordRow(hostRecord: record["rr"].string, name: name,
                                                    type: record["type"].string, value: record["value"].string,
                                                    ttl: record["ttl"].int, status: dnsRecordStatusText(record, provider: provider),
                                                    statusTone: dnsRecordStatusTone(record, provider: provider),
-                                                   serviceSummary: domainBindingSummary(binding, deployments: model.deployments),
+                                                   serviceSummary: binding.isNull && !ingress.isNull
+                                                    ? ingressState.summary : domainBindingSummary(binding, deployments: model.deployments),
                                                    serviceStatus: serviceState.title, serviceTone: serviceState.tone) {
                                     HStack(spacing: AppSpacing.sm) {
                                         Button(binding.isNull ? "服务绑定" : "管理绑定") { openDNSBinding(record, domain: domain) }
@@ -204,12 +209,13 @@ struct DomainsPage: View {
                                             .accessibilityLabel("\(binding.isNull ? "服务绑定" : "管理绑定")，\(name)")
                                             .disabled(!record["bindingEligible"].bool || dnsLoading || loading)
                                             .help(record["bindingEligible"].bool ? "为此域名选择部署服务" : record["bindingDisabledReason"].string)
-                                        if record["bindingEligible"].bool && record["fqdn"].string != domain["name"].string {
-                                            Button("HTTPS") { openCertificate(record["fqdn"].string, binding: binding) }
-                                                .buttonStyle(DeploySecondaryButtonStyle())
-                                                .accessibilityLabel("配置 HTTPS 证书，\(name)")
-                                                .disabled(dnsLoading || loading)
-                                        }
+                                        let showsHTTPS = record["bindingEligible"].bool && record["fqdn"].string != domain["name"].string
+                                        Button("HTTPS") { openCertificate(record["fqdn"].string, binding: binding) }
+                                            .buttonStyle(DeploySecondaryButtonStyle())
+                                            .accessibilityLabel("配置 HTTPS 证书，\(name)")
+                                            .opacity(showsHTTPS ? 1 : 0)
+                                            .accessibilityHidden(!showsHTTPS)
+                                            .disabled(!showsHTTPS || dnsLoading || loading)
                                         Menu {
                                             Button("复制主机记录") { copyDNSRecordText(record["rr"].string) }
                                             Button("复制域名") { copyDNSRecordText(name) }
@@ -458,6 +464,17 @@ struct DomainsPage: View {
     private func refreshDomainData(_ domain: J) {
         loadHosts(domain.id)
         loadDNSRecords(domain)
+        loadInternalIngresses()
+    }
+
+    private func loadInternalIngresses() {
+        Task {
+            do {
+                internalIngresses = try await NativeBridge.call("ListInternalIngresses").array
+            } catch {
+                internalIngresses = []
+            }
+        }
     }
 
     private func loadHosts(_ id: String) {

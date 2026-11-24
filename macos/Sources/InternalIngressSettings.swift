@@ -24,6 +24,23 @@ struct InternalIngressSettings: View {
     private var applying: Bool { selected?["status"].string == "applying" }
     private var canSave: Bool { !busy && !ready && !fqdn.isEmpty && !serverID.isEmpty && Int(port) != nil }
 
+    private var savedIngressSelection: Binding<String> {
+        Binding(
+            get: { selected?["fqdn"].string ?? "" },
+            set: { value in
+                if value.isEmpty {
+                    serverID = ""
+                    webroot = ""
+                }
+                fqdn = value
+            }
+        )
+    }
+
+    private var knownHostSelection: Binding<String> {
+        Binding(get: { knownHosts.contains(fqdn) ? fqdn : "" }, set: { fqdn = $0 })
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 12) {
@@ -32,7 +49,7 @@ struct InternalIngressSettings: View {
                 Text("先选域名与入口服务器，配置证书，再部署仅监听服务器本机的入口服务。就绪后，项目可在发布时选择这个域名下的路径。")
                     .font(.system(size: 11)).foregroundStyle(DeployStyle.muted)
                 if !entries.isEmpty {
-                    Picker("已有入口", selection: $fqdn) {
+                    Picker("已有入口", selection: savedIngressSelection) {
                         Text("新建入口").tag("")
                         ForEach(entries.indices, id: \.self) { index in
                             let entry = entries[index]
@@ -42,7 +59,7 @@ struct InternalIngressSettings: View {
                     }
                 }
                 HStack(spacing: 8) {
-                    Picker("从域名列表选择", selection: $fqdn) {
+                    Picker("从域名列表选择", selection: knownHostSelection) {
                         Text("选择域名").tag("")
                         ForEach(knownHosts, id: \.self) { host in Text(host).tag(host) }
                     }
@@ -132,7 +149,7 @@ struct InternalIngressSettings: View {
         .onChange(of: fqdn) { value in
             plan = J(nil)
             inspection = J(nil)
-            if let entry = entries.first(where: { $0["fqdn"].string == value }) {
+            if let entry = entries.first(where: { $0["fqdn"].string == value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }) {
                 serverID = entry["serverId"].string
                 port = entry["gatewayPort"].string
                 webroot = entry["webroot"].string
@@ -152,12 +169,26 @@ struct InternalIngressSettings: View {
         }
     }
 
-    private func loadEntries() async {
-        if let result = try? await NativeBridge.call("ListInternalIngresses") { entries = result.array }
+    private func loadEntries(selectDefault: Bool = false) async {
+        do {
+            let result = try await NativeBridge.call("ListInternalIngresses")
+            guard !Task.isCancelled else { return }
+            entries = result.array
+            if selectDefault, fqdn.isEmpty, serverID.isEmpty, port == "8766",
+               webroot.isEmpty, certificate.isEmpty, certificateKey.isEmpty,
+               let entry = entries.first(where: { $0["status"].string == "ready" }) ?? entries.first {
+                fqdn = entry["fqdn"].string
+            }
+        } catch {
+            if selectDefault && !Task.isCancelled {
+                message = "读取已有 HTTPS 入口失败。\(error.localizedDescription)"
+            }
+        }
     }
 
     private func load() async {
-        await loadEntries()
+        await loadEntries(selectDefault: true)
+        guard !Task.isCancelled else { return }
         loadingKnownHosts = true
         knownHostsError = ""
         defer { loadingKnownHosts = false }
