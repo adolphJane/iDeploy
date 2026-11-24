@@ -37,9 +37,11 @@ type Job struct {
 }
 
 type NewJob struct {
-	Type    string
-	LockKey string
-	Payload string
+	ReleaseID        string
+	ControlRequestID string
+	Type             string
+	LockKey          string
+	Payload          string
 }
 
 func newID() (string, error) {

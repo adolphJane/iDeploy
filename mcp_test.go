@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -80,7 +81,7 @@ func TestMCPListsExpectedTools(t *testing.T) {
 		"list_domains": false, "list_domain_hosts": false, "list_dns_records": false, "list_internal_ingresses": false,
 		"list_remote_containers": false, "get_container_logs": false, "check_port_availability": false,
 		"list_registries": false, "get_build_proxy_settings": false, "configure_build_proxy": false,
-		"get_operation": false, "list_deployments": false, "list_deployment_environment": false,
+		"get_operation": false, "get_deployment_runtime_policy": false, "update_deployment_runtime_policy": false, "get_release_runtime_verification": false, "list_deployments": false, "list_deployment_environment": false,
 		"create_deployment": false, "update_deployment": false, "clone_deployment": false, "delete_deployment": false, "get_deployment": false, "preflight_deployment": false, "get_preflight_progress": false, "inspect_deployment_runtime": false, "list_releases": false, "list_jobs": false,
 		"update_deployment_environment": false, "request_deployment_secret_input": false,
 		"get_job": false, "wait_job": false, "publish_deployment": false,
@@ -477,5 +478,43 @@ func connectMCPTestClient(t *testing.T, execute mcpRequestExecutor) (*mcp.Client
 		_ = clientSession.Close()
 		_ = serverSession.Close()
 		cancel()
+	}
+}
+
+func TestMCPPublicationPromptAndPolicyRevision(t *testing.T) {
+	requests := make(chan cliRequest, 1)
+	client, closeSessions := connectMCPTestClient(t, func(_ context.Context, request cliRequest) cliResponse {
+		requests <- request
+		return cliResponseFromValue(map[string]string{"id": "fixture-job"})
+	})
+	defer closeSessions()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	prompts, err := client.ListPrompts(ctx, nil)
+	if err != nil || len(prompts.Prompts) != 1 || prompts.Prompts[0].Name != "ideploy_release" {
+		t.Fatalf("publish prompt is missing: %#v %v", prompts, err)
+	}
+	prompt, err := client.GetPrompt(ctx, &mcp.GetPromptParams{Name: "ideploy_release"})
+	if err != nil || len(prompt.Messages) != 1 {
+		t.Fatalf("get release prompt: %#v %v", prompt, err)
+	}
+	if text, ok := prompt.Messages[0].Content.(*mcp.TextContent); !ok || !strings.Contains(text.Text, "inspect_deployment_runtime") {
+		t.Fatal("publish prompt must include runtime verification")
+	}
+	select {
+	case request := <-requests:
+		t.Fatalf("reading the prompt dispatched a request: %s", request.Command)
+	default:
+	}
+	result, err := client.CallTool(ctx, &mcp.CallToolParams{Name: "publish_deployment", Arguments: map[string]any{
+		"deployment_id": "deployment-1", "registry_id": "registry-1", "domain": "example.test",
+		"path": "app", "container_port": 8080, "request_id": "publish:fixture-1", "policy_revision": 3,
+	}})
+	if err != nil || result.IsError {
+		t.Fatalf("publish mapping failed: %#v %v", result, err)
+	}
+	request := <-requests
+	if request.RequestID != "publish:fixture-1" || request.ExpectedPolicyRevision == nil || *request.ExpectedPolicyRevision != 3 {
+		t.Fatalf("policy revision or request identity missing: %#v", request)
 	}
 }

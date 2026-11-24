@@ -25,8 +25,8 @@ func TestOpenAppliesMigrationsIdempotently(t *testing.T) {
 	if err := first.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&migrations); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if migrations != 27 {
-		t.Fatalf("expected 27 applied migrations, got %d", migrations)
+	if migrations != 28 {
+		t.Fatalf("expected 28 applied migrations, got %d", migrations)
 	}
 	if err := first.Close(); err != nil {
 		t.Fatalf("close first database: %v", err)
@@ -41,7 +41,7 @@ func TestOpenAppliesMigrationsIdempotently(t *testing.T) {
 	if err := second.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&migrations); err != nil {
 		t.Fatalf("count migrations after reopen: %v", err)
 	}
-	if migrations != 27 {
+	if migrations != 28 {
 		t.Fatalf("migration was not idempotent: got %d rows", migrations)
 	}
 }

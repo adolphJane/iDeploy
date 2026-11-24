@@ -146,6 +146,12 @@ func (s *Server) putResource(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "resource too large", http.StatusRequestEntityTooLarge)
 		return
 	}
+	if kind == "r.runtime_policies" || kind == "r.release_policies" {
+		if err := validateImportRecord(importRecord{Kind: kind, ID: id, Data: data}); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
 	s.writeResource(w, r, kind, id, input.ExpectedRevision, data, false)
 }
 

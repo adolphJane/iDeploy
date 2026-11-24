@@ -30,12 +30,17 @@ func (s *Store) Enqueue(ctx context.Context, input NewJob) (Job, error) {
 		return Job{}, err
 	}
 	now := time.Now().UTC()
-	result, err := s.db.ExecContext(ctx, `
-        INSERT INTO jobs(id, type, lock_key, payload, status, created_at, updated_at)
-        SELECT ?, ?, ?, ?, ?, ?, ? WHERE ? = '' OR NOT EXISTS (
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Job{}, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+        INSERT INTO jobs(id, type, lock_key, payload, status, created_at, updated_at, control_request_id)
+        SELECT ?, ?, ?, ?, ?, ?, ?, NULLIF(?, '') WHERE ? = '' OR NOT EXISTS (
             SELECT 1 FROM jobs WHERE lock_key=? AND status IN ('queued','running','canceling')
         )
-    `, id, input.Type, input.LockKey, input.Payload, StatusQueued, formatTime(now), formatTime(now), input.LockKey, input.LockKey)
+    `, id, input.Type, input.LockKey, input.Payload, StatusQueued, formatTime(now), formatTime(now), input.ControlRequestID, input.LockKey, input.LockKey)
 	if err != nil {
 		return Job{}, fmt.Errorf("enqueue job: %w", err)
 	}
@@ -44,7 +49,20 @@ func (s *Store) Enqueue(ctx context.Context, input NewJob) (Job, error) {
 	} else if n == 0 {
 		return Job{}, errors.New("该资源已有任务正在执行，请等待完成")
 	}
-	return s.Get(ctx, id)
+	if input.ReleaseID != "" {
+		attached, err := tx.ExecContext(ctx, "UPDATE deployment_releases SET job_id=? WHERE id=? AND job_id IS NULL", id, input.ReleaseID)
+		if err != nil {
+			return Job{}, err
+		}
+		if err := requireAffected(attached); err != nil {
+			return Job{}, err
+		}
+	}
+	value, err := scanJob(tx.QueryRowContext(ctx, jobSelect+" WHERE id=?", id))
+	if err != nil {
+		return Job{}, err
+	}
+	return value, tx.Commit()
 }
 
 func (s *Store) Get(ctx context.Context, id string) (Job, error) {

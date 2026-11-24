@@ -215,7 +215,7 @@ func (r *Remote) LoginRegistry(ctx context.Context, connection Connection, regis
 // DeployContainer stages a replacement while preserving the previous
 // container under a temporary backup name. Call CommitContainerReplacement
 // only after health checks pass, or RollbackContainerReplacement on failure.
-func (r *Remote) DeployContainer(ctx context.Context, connection Connection, name, image, restartPolicy string, ports []string, labels map[string]string, environment map[string]string) (ContainerReplacement, error) {
+func (r *Remote) DeployContainer(ctx context.Context, connection Connection, name, image, restartPolicy string, ports []string, labels map[string]string, environment map[string]string, mounts ...ContainerMountSpec) (ContainerReplacement, error) {
 	if !validContainerID(name) {
 		return ContainerReplacement{}, errors.New("invalid container name")
 	}
@@ -234,6 +234,16 @@ func (r *Remote) DeployContainer(ctx context.Context, connection Connection, nam
 	}
 	backupName := backupBase + suffix
 	args := []string{"docker run -d", "--restart " + shellQuote(restartPolicy), "--name " + shellQuote(name)}
+	if len(mounts) > 16 {
+		return ContainerReplacement{}, errors.New("容器最多支持 16 个配置挂载")
+	}
+	for _, mount := range mounts {
+		argument, err := mount.Argument()
+		if err != nil {
+			return ContainerReplacement{}, err
+		}
+		args = append(args, "--mount "+shellQuote(argument))
+	}
 	environmentInput, err := dockerEnvironmentFile(environment)
 	if err != nil {
 		return ContainerReplacement{}, err

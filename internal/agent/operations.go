@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"ideploy/internal/server"
 )
 
 var operationIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
@@ -21,27 +23,28 @@ var containerIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`
 var imageReferencePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,511}$`)
 
 type OperationRequest struct {
-	ID             string            `json:"id"`
-	Kind           string            `json:"kind"`
-	ContainerID    string            `json:"containerId"`
-	Image          string            `json:"image,omitempty"`
-	TargetImage    string            `json:"targetImage,omitempty"`
-	RestartPolicy  string            `json:"restartPolicy,omitempty"`
-	Ports          []string          `json:"ports,omitempty"`
-	Labels         map[string]string `json:"labels,omitempty"`
-	Environment    map[string]string `json:"environment,omitempty"`
-	BackupName     string            `json:"backupName,omitempty"`
-	HadPrevious    bool              `json:"hadPrevious,omitempty"`
-	DeploymentID   string            `json:"deploymentId,omitempty"`
-	ProjectName    string            `json:"projectName,omitempty"`
-	Version        string            `json:"version,omitempty"`
-	Manifest       string            `json:"manifest,omitempty"`
-	NginxContainer string            `json:"nginxContainer,omitempty"`
-	NginxConfig    string            `json:"nginxConfig,omitempty"`
-	ExpectedHash   string            `json:"expectedHash,omitempty"`
-	FQDN           string            `json:"fqdn,omitempty"`
-	Email          string            `json:"email,omitempty"`
-	WebrootHost    string            `json:"webrootHost,omitempty"`
+	Mounts         []server.ContainerMountSpec `json:"mounts,omitempty"`
+	ID             string                      `json:"id"`
+	Kind           string                      `json:"kind"`
+	ContainerID    string                      `json:"containerId"`
+	Image          string                      `json:"image,omitempty"`
+	TargetImage    string                      `json:"targetImage,omitempty"`
+	RestartPolicy  string                      `json:"restartPolicy,omitempty"`
+	Ports          []string                    `json:"ports,omitempty"`
+	Labels         map[string]string           `json:"labels,omitempty"`
+	Environment    map[string]string           `json:"environment,omitempty"`
+	BackupName     string                      `json:"backupName,omitempty"`
+	HadPrevious    bool                        `json:"hadPrevious,omitempty"`
+	DeploymentID   string                      `json:"deploymentId,omitempty"`
+	ProjectName    string                      `json:"projectName,omitempty"`
+	Version        string                      `json:"version,omitempty"`
+	Manifest       string                      `json:"manifest,omitempty"`
+	NginxContainer string                      `json:"nginxContainer,omitempty"`
+	NginxConfig    string                      `json:"nginxConfig,omitempty"`
+	ExpectedHash   string                      `json:"expectedHash,omitempty"`
+	FQDN           string                      `json:"fqdn,omitempty"`
+	Email          string                      `json:"email,omitempty"`
+	WebrootHost    string                      `json:"webrootHost,omitempty"`
 }
 
 type Operation struct {
@@ -90,6 +93,16 @@ func validateOperation(req OperationRequest) error {
 	case "container.deploy":
 		if !containerIDPattern.MatchString(req.ContainerID) || !validImage(req.Image) || !validRestart(req.RestartPolicy) || len(req.Ports) > 64 || len(req.Labels) > 128 || len(req.Environment) > 128 {
 			return errors.New("invalid container deployment request")
+		}
+		if len(req.Mounts) > 16 {
+			return errors.New("too many container mounts")
+		}
+		mountTargets := map[string]bool{}
+		for _, mount := range req.Mounts {
+			if _, err := mount.Argument(); err != nil || mountTargets[mount.Destination] {
+				return errors.New("invalid or duplicate container mount")
+			}
+			mountTargets[mount.Destination] = true
 		}
 		for _, port := range req.Ports {
 			if !deploymentPortPattern.MatchString(port) {

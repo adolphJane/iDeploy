@@ -137,10 +137,10 @@ func (s *SystemService) PublishDeployment(input DeploymentReleaseInput) (JobView
 	if err := s.ensureSharedPublicationReady(); err != nil {
 		return JobView{}, err
 	}
-	return s.publishDeployment(input, false)
+	return s.publishDeployment(input, "")
 }
 
-func (s *SystemService) publishDeployment(input DeploymentReleaseInput, retryFailed bool) (JobView, error) {
+func (s *SystemService) publishDeployment(input DeploymentReleaseInput, retrySourceID string) (JobView, error) {
 	store, err := s.deploymentStore()
 	if err != nil {
 		return JobView{}, err
@@ -212,7 +212,7 @@ func (s *SystemService) publishDeployment(input DeploymentReleaseInput, retryFai
 		return JobView{}, err
 	}
 	var versionErr error
-	if retryFailed {
+	if retrySourceID != "" {
 		versionErr = deployment.ValidateRetryVersion(input.Version, history)
 	} else {
 		versionErr = deployment.ValidateNewVersion(input.Version, history)
@@ -244,6 +244,26 @@ func (s *SystemService) publishDeployment(input DeploymentReleaseInput, retryFai
 	if err := s.validateDeploymentPortAvailability(ctx, target, host); err != nil {
 		return JobView{}, err
 	}
+	policy, err := store.RuntimePolicy(ctx, target.ID)
+	if err != nil {
+		return JobView{}, err
+	}
+	if input.ExpectedPolicyRevision != nil && *input.ExpectedPolicyRevision != policy.Revision {
+		return JobView{}, deployment.ErrRuntimePolicyConflict
+	}
+	if err := s.verifySharedRuntimePolicy(ctx, target, policy); err != nil {
+		return JobView{}, err
+	}
+	if policy.Mode == deployment.RuntimeEnforce {
+		remote := server.NewRemote()
+		containers, err := remote.ListContainers(ctx, host)
+		if err != nil {
+			return JobView{}, err
+		}
+		if err := runtimeCheckFailure(checkRuntimeBaseline(ctx, remote, host, target, policy, containers)); err != nil {
+			return JobView{}, err
+		}
+	}
 	if strings.TrimSpace(input.RegistryID) == "" {
 		return JobView{}, errors.New("请选择镜像仓库")
 	}
@@ -274,7 +294,7 @@ func (s *SystemService) publishDeployment(input DeploymentReleaseInput, retryFai
 		return JobView{}, err
 	}
 	release, err := store.CreateRelease(ctx, deployment.ReleaseInput{
-		DeploymentID: target.ID, RegistryID: input.RegistryID, Action: "deploy", Version: input.Version, AllowRetry: retryFailed, BuildMode: target.BuildMode,
+		DeploymentID: target.ID, RegistryID: input.RegistryID, Action: "deploy", Version: input.Version, AllowRetry: retrySourceID != "", PolicySourceID: retrySourceID, ExpectedPolicyRevision: input.ExpectedPolicyRevision, BuildMode: target.BuildMode,
 	})
 	if err != nil {
 		return JobView{}, err
@@ -289,12 +309,9 @@ func (s *SystemService) publishDeployment(input DeploymentReleaseInput, retryFai
 	if err != nil {
 		return JobView{}, err
 	}
-	queued, err := runner.Enqueue(ctx, job.NewJob{Type: "deployment.release", LockKey: "server:" + target.ServerID, Payload: string(payload)})
+	queued, err := runner.Enqueue(ctx, job.NewJob{Type: "deployment.release", LockKey: "server:" + target.ServerID, Payload: string(payload), ReleaseID: release.ID, ControlRequestID: input.controlRequestID})
 	if err != nil {
 		_ = store.UpdateRelease(ctx, release.ID, deployment.ReleaseFailed, err.Error(), "", "", "")
-		return JobView{}, err
-	}
-	if err := store.AttachReleaseJob(ctx, release.ID, queued.ID); err != nil {
 		return JobView{}, err
 	}
 	return toJobView(queued), nil
@@ -392,7 +409,7 @@ func (s *SystemService) RetryRelease(releaseID string) (JobView, error) {
 		return s.publishDeployment(DeploymentReleaseInput{
 			DeploymentID: source.DeploymentID, RegistryID: source.RegistryID, Version: source.Version,
 			FQDN: intent.FQDN, PathPrefix: intent.PathPrefix, ServiceName: intent.ServiceName, ContainerPort: intent.ContainerPort,
-		}, true)
+		}, source.ID)
 	}
 	if err := validateRollbackArtifact(source.ImageRef, source.Manifest); err != nil {
 		return JobView{}, fmt.Errorf("失败记录的已推送制品不可恢复: %w", err)
@@ -451,12 +468,9 @@ func (s *SystemService) RetryRelease(releaseID string) (JobView, error) {
 	if err != nil {
 		return JobView{}, err
 	}
-	queued, err := runner.Enqueue(ctx, job.NewJob{Type: "deployment.resume", LockKey: "server:" + target.ServerID, Payload: string(payload)})
+	queued, err := runner.Enqueue(ctx, job.NewJob{Type: "deployment.resume", LockKey: "server:" + target.ServerID, Payload: string(payload), ReleaseID: release.ID})
 	if err != nil {
 		_ = store.UpdateRelease(ctx, release.ID, deployment.ReleaseFailed, err.Error(), "", "", "")
-		return JobView{}, err
-	}
-	if err := store.AttachReleaseJob(ctx, release.ID, queued.ID); err != nil {
 		return JobView{}, err
 	}
 	return toJobView(queued), nil
@@ -525,12 +539,9 @@ func (s *SystemService) RollbackDeployment(deploymentID, sourceReleaseID string)
 	if err != nil {
 		return JobView{}, err
 	}
-	queued, err := runner.Enqueue(ctx, job.NewJob{Type: "deployment.rollback", LockKey: "server:" + target.ServerID, Payload: string(payload)})
+	queued, err := runner.Enqueue(ctx, job.NewJob{Type: "deployment.rollback", LockKey: "server:" + target.ServerID, Payload: string(payload), ReleaseID: release.ID})
 	if err != nil {
 		_ = store.UpdateRelease(ctx, release.ID, deployment.ReleaseFailed, err.Error(), "", "", "")
-		return JobView{}, err
-	}
-	if err := store.AttachReleaseJob(ctx, release.ID, queued.ID); err != nil {
 		return JobView{}, err
 	}
 	return toJobView(queued), nil
@@ -597,6 +608,11 @@ func (s *SystemService) deploymentOperationHandler(ctx context.Context, task job
 		return errors.New("远端工作负载不存在，请刷新并检查绑定")
 	}
 	if p.Action == "restart" && target.WorkloadKind == "container" {
+		ctx, releaseLease, err := s.leaseSharedPublication(ctx, target.ServerID, task.ID)
+		if err != nil {
+			return err
+		}
+		defer releaseLease()
 		return s.recreateDeploymentContainer(ctx, store, target, host, task.ID, selected, reporter, remote)
 	}
 	if p.Action != "restart" {
@@ -652,6 +668,22 @@ func (s *SystemService) recreateDeploymentContainer(ctx context.Context, store *
 		return err
 	}
 	target = currentTarget
+	policy, err := store.RuntimePolicy(ctx, target.ID)
+	if err != nil {
+		return err
+	}
+	if err := s.verifySharedRuntimePolicy(ctx, target, policy); err != nil {
+		return err
+	}
+	if policy.Mode == deployment.RuntimeEnforce {
+		if err := runtimeCheckFailure(checkRuntimeBaseline(ctx, remote, host, target, policy, selected)); err != nil {
+			return err
+		}
+	}
+	mounts, err := singleContainerMounts(ctx, remote, host, target, policy, selected)
+	if err != nil {
+		return err
+	}
 	image := selected[0].Image
 	labels := map[string]string{"com.ideploy.environment-revision": fmt.Sprint(target.EnvironmentRevision)}
 	if release, releaseErr := store.LatestSucceededRelease(ctx, target.ID); releaseErr == nil {
@@ -670,12 +702,13 @@ func (s *SystemService) recreateDeploymentContainer(ctx context.Context, store *
 		}
 	}
 	reporter.Progress(20, fmt.Sprintf("正在使用原镜像重建容器并注入 %d 个环境变量", len(environment)))
-	replacement, err := remote.DeployContainerWithAgent(ctx, host, target.ServerID, jobID, target.WorkloadName, image, target.RestartPolicy, target.ContainerPorts, labels, environment)
+	replacement, err := remote.DeployContainerWithAgent(ctx, host, target.ServerID, jobID, target.WorkloadName, image, target.RestartPolicy, target.ContainerPorts, labels, environment, mounts...)
 	if err != nil {
 		return err
 	}
 	deadline := time.Now().Add(90 * time.Second)
 	lastDetail := "尚未发现重建后的容器"
+verify:
 	for {
 		containers, inspectErr := remote.ListContainers(ctx, host)
 		if inspectErr != nil {
@@ -683,6 +716,20 @@ func (s *SystemService) recreateDeploymentContainer(ctx context.Context, store *
 		} else {
 			matched := deployment.Match(target, containers)
 			if len(matched) == 1 && matched[0].State == "running" && matched[0].Health != "unhealthy" && matched[0].Health != "starting" {
+				if policy.Mode == deployment.RuntimeEnforce {
+					details, err := inspectBoundContainers(ctx, remote, host, target, matched)
+					if err == nil {
+						checks := inspectRuntimePolicy(ctx, remote, host, policy, details)
+						if reference := labels["com.ideploy.pinned-image"]; reference != "" {
+							checks = append(checks, inspectReleaseImages(ctx, remote, host, details, map[string]string{"": reference})...)
+						}
+						err = runtimeCheckFailure(checks)
+					}
+					if err != nil {
+						lastDetail = err.Error()
+						break verify
+					}
+				}
 				if err := remote.CommitContainerReplacementWithAgent(ctx, host, target.ServerID, jobID, replacement); err != nil {
 					return fmt.Errorf("新容器已运行，但清理旧容器失败: %w", err)
 				}

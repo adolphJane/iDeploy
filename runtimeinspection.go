@@ -12,12 +12,19 @@ import (
 )
 
 type DeploymentRuntimeView struct {
-	DeploymentID string                `json:"deploymentId"`
-	ServerID     string                `json:"serverId"`
-	Status       string                `json:"status"`
-	Detail       string                `json:"detail"`
-	ObservedAt   string                `json:"observedAt"`
-	Containers   []RemoteContainerView `json:"containers"`
+	DeploymentID      string                           `json:"deploymentId"`
+	ServerID          string                           `json:"serverId"`
+	Status            string                           `json:"status"`
+	Detail            string                           `json:"detail"`
+	ObservedAt        string                           `json:"observedAt"`
+	Containers        []RemoteContainerView            `json:"containers"`
+	RuntimeDetails    []server.ContainerRuntimeDetails `json:"runtimeDetails,omitempty"`
+	InspectionStatus  string                           `json:"inspectionStatus"`
+	PolicyRevision    int64                            `json:"policyRevision"`
+	ExpectedReleaseID string                           `json:"expectedReleaseId,omitempty"`
+	ExpectedVersion   string                           `json:"expectedVersion,omitempty"`
+	VerifiedVersion   string                           `json:"verifiedVersion,omitempty"`
+	Checks            []deployment.RuntimeCheck        `json:"checks,omitempty"`
 }
 
 type ContainerLogsInput struct {
@@ -87,7 +94,76 @@ func (s *SystemService) InspectDeploymentRuntime(id string) (DeploymentRuntimeVi
 	if remoteView.Stale {
 		status, detail = "unknown", "远程刷新失败，返回的是缓存状态: "+remoteView.Detail
 	}
-	return DeploymentRuntimeView{DeploymentID: target.ID, ServerID: target.ServerID, Status: status, Detail: detail, ObservedAt: remoteView.ObservedAt, Containers: containers}, nil
+	view := DeploymentRuntimeView{DeploymentID: target.ID, ServerID: target.ServerID, Status: status, Detail: detail, ObservedAt: remoteView.ObservedAt, Containers: containers, InspectionStatus: "unknown"}
+	if remoteView.Stale {
+		return view, nil
+	}
+	inspectCtx, stop := context.WithTimeout(context.Background(), 55*time.Second)
+	defer stop()
+	policy, err := deployments.RuntimePolicy(inspectCtx, target.ID)
+	if err != nil {
+		return view, err
+	}
+	view.PolicyRevision = policy.Revision
+	servers, err := s.serverStore()
+	if err != nil {
+		return view, err
+	}
+	host, err := servers.Get(inspectCtx, target.ServerID)
+	if err != nil {
+		return view, err
+	}
+	ids := make([]string, 0, len(containers))
+	for _, container := range containers {
+		ids = append(ids, container.ID)
+	}
+	remote := server.NewRemote()
+	view.RuntimeDetails, err = remote.InspectContainerRuntime(inspectCtx, host, ids)
+	if err != nil {
+		view.Detail = err.Error()
+		return view, nil
+	}
+	view.InspectionStatus = "observed"
+	view.Checks = inspectRuntimePolicy(inspectCtx, remote, host, policy, view.RuntimeDetails)
+	if release, err := deployments.LatestSucceededRelease(inspectCtx, target.ID); err == nil {
+		view.ExpectedReleaseID, view.ExpectedVersion = release.ID, release.Version
+		references, err := releaseImageReferences(target, release.ImageRef, release.Manifest)
+		if err == nil {
+			imageChecks := inspectReleaseImages(inspectCtx, remote, host, view.RuntimeDetails, references)
+			view.Checks = append(view.Checks, imageChecks...)
+			if status == "running" && allReleaseImagesVerified(imageChecks, references, policy.Services) {
+				view.VerifiedVersion = release.Version
+			}
+		}
+	}
+	return view, nil
+}
+
+func allReleaseImagesVerified(checks []deployment.RuntimeCheck, references map[string]string, requiredServices []string) bool {
+	if len(checks) == 0 {
+		return false
+	}
+	verified := map[string]bool{}
+	for _, check := range checks {
+		if check.Status != "ok" {
+			return false
+		}
+		verified[check.Service] = true
+	}
+	if len(requiredServices) == 0 {
+		for service := range references {
+			if !verified[service] {
+				return false
+			}
+		}
+		return true
+	}
+	for _, service := range requiredServices {
+		if !verified[service] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *SystemService) GetContainerLogs(input ContainerLogsInput) (ContainerLogsView, error) {

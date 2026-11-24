@@ -34,6 +34,13 @@ func deployContainer(ctx context.Context, req OperationRequest) (ContainerReplac
 	backup := backupBase + suffix
 	replacement := ContainerReplacement{Name: name, BackupName: backup}
 	args := []string{"run", "-d", "--restart", req.RestartPolicy, "--name", name}
+	for _, mount := range req.Mounts {
+		argument, err := mount.Argument()
+		if err != nil {
+			return ContainerReplacement{}, err
+		}
+		args = append(args, "--mount", argument)
+	}
 	if len(req.Environment) > 0 {
 		if err := os.MkdirAll("/run/ideploy-agent", 0o700); err != nil {
 			return ContainerReplacement{}, err

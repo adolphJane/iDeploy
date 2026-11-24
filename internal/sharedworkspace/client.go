@@ -13,8 +13,11 @@ import (
 	"strings"
 	"time"
 
+	"ideploy/internal/deployment"
 	"ideploy/internal/server"
 )
+
+const RuntimePolicyAPIVersion = 3
 
 type Client struct {
 	http  *http.Client
@@ -156,7 +159,17 @@ func (c *Client) Workspace(ctx context.Context) (WorkspaceInfo, error) {
 }
 
 func (c *Client) AcquireLease(ctx context.Context, resourceID, requestID string) error {
-	return c.request(ctx, http.MethodPost, "/v2/leases/"+url.PathEscape(resourceID), map[string]string{"requestId": requestID}, nil)
+	return c.request(ctx, http.MethodPost, "/v2/leases/"+url.PathEscape(resourceID), map[string]any{"requestId": requestID, "runtimePolicyProtocol": 1}, nil)
+}
+
+func (c *Client) RuntimePolicy(ctx context.Context, deploymentID string) (deployment.RuntimePolicy, error) {
+	var value deployment.RuntimePolicy
+	err := c.request(ctx, http.MethodGet, "/v3/runtime-policies/"+url.PathEscape(deploymentID), nil, &value)
+	var status *HTTPStatusError
+	if errors.As(err, &status) && status.Code == http.StatusNotFound {
+		return deployment.RuntimePolicy{Mode: deployment.RuntimeObserve}, nil
+	}
+	return value, err
 }
 
 func (c *Client) ReleaseLease(ctx context.Context, resourceID, requestID string) error {

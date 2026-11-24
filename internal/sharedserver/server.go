@@ -14,9 +14,10 @@ import (
 
 	mysql "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"ideploy/internal/sharedworkspace"
 )
 
-const APIVersion = 2
+const APIVersion = sharedworkspace.RuntimePolicyAPIVersion
 
 type Server struct {
 	db              *sql.DB
@@ -190,6 +191,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v3/releases/by-request/{id}", s.authorize(s.getReleaseJobByRequestHTTP))
 	mux.HandleFunc("DELETE /v3/releases/by-request/{id}", s.authorize(s.cancelReleaseJobHTTP))
 	mux.HandleFunc("GET /v3/releases/{id}", s.authorize(s.getReleaseJobHTTP))
+	mux.HandleFunc("GET /v3/runtime-policies/{id}", s.authorize(s.getRuntimePolicy))
 	return mux
 }
 

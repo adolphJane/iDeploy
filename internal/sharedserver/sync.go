@@ -157,6 +157,18 @@ func validateImportRecord(value importRecord) error {
 			return errors.New("unsupported resource field")
 		}
 	}
+	if value.Kind == "r.runtime_policies" || value.Kind == "r.release_policies" {
+		idField := "deployment_id"
+		if value.Kind == "r.release_policies" {
+			idField = "release_id"
+		}
+		if data[idField] != value.ID {
+			return errors.New("runtime policy ID mismatch")
+		}
+		if _, err := decodeRuntimePolicy(value.Data); err != nil {
+			return err
+		}
+	}
 	if value.Kind == "r.project_sources" {
 		if address, _ := data["repository_url"].(string); address != "" {
 			parsed, err := url.Parse(address)
@@ -472,7 +484,8 @@ func (s *Server) acquireLease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		RequestID string `json:"requestId"`
+		RequestID             string `json:"requestId"`
+		RuntimePolicyProtocol int    `json:"runtimePolicyProtocol"`
 	}
 	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&input) != nil || len(input.RequestID) < 16 || len(input.RequestID) > 128 {
 		http.Error(w, "invalid request id", http.StatusBadRequest)
@@ -487,6 +500,17 @@ func (s *Server) acquireLease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	if input.RuntimePolicyProtocol < 1 && strings.HasPrefix(id, "server:") {
+		required, err := s.serverHasEnforcedPolicy(r.Context(), tx, strings.TrimPrefix(id, "server:"))
+		if err != nil {
+			http.Error(w, "runtime policy unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if required {
+			http.Error(w, "upgrade iDeploy to publish on a server with enforced runtime policies", http.StatusPreconditionFailed)
+			return
+		}
+	}
 	var requestID, currentOwner, currentExpiry string
 	err = tx.QueryRowContext(r.Context(), s.query(`SELECT request_id,owner_hash,expires_at FROM shared_leases WHERE resource_id=$1 FOR UPDATE`), id).Scan(&requestID, &currentOwner, &currentExpiry)
 	if err == nil && currentExpiry > now.Format(time.RFC3339Nano) && (requestID != input.RequestID || currentOwner != owner) {

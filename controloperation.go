@@ -39,6 +39,12 @@ func executeIdempotentCLIRequest(ctx context.Context, service *SystemService, re
 	if !controlRequestIDPattern.MatchString(request.RequestID) {
 		return errorCLIResponse("invalid_request", "request_id must be 8 to 128 safe characters")
 	}
+	waitForPublish := request.Command == "deployment.publish" && request.Wait
+	if request.Command == "deployment.publish" {
+		// The durable receipt is for job submission. Waiting is a separate
+		// client preference and can succeed after a previous caller timed out.
+		request.Wait = false
+	}
 	hash, err := controlRequestHash(request)
 	if err != nil {
 		return errorCLIResponse("encoding_failed", err.Error())
@@ -52,7 +58,7 @@ func executeIdempotentCLIRequest(ctx context.Context, service *SystemService, re
 			return errorCLIResponse("idempotency_conflict", "request_id was already used for a different request")
 		}
 		if operation.response != nil {
-			return *operation.response
+			return waitForPublicationReceipt(ctx, service, *operation.response, waitForPublish)
 		}
 		response := errorCLIResponse("operation_pending", "request was accepted and is still being processed")
 		response.Data, _ = json.Marshal(operation.public())
@@ -63,6 +69,35 @@ func executeIdempotentCLIRequest(ctx context.Context, service *SystemService, re
 	if err := service.finishControlOperation(context.Background(), request.RequestID, response); err != nil {
 		return errorCLIResponse("operation_failed", "operation finished but its result could not be persisted: "+err.Error())
 	}
+	return waitForPublicationReceipt(ctx, service, response, waitForPublish)
+}
+
+func waitForPublicationReceipt(ctx context.Context, service *SystemService, response cliResponse, wait bool) cliResponse {
+	if !wait || !response.OK {
+		return response
+	}
+	var queued JobView
+	if err := json.Unmarshal(response.Data, &queued); err != nil || queued.ID == "" {
+		return errorCLIResponse("invalid_receipt", "publish receipt is missing the job ID")
+	}
+	job, err := waitForCLIJob(ctx, service, queued.ID)
+	if err != nil {
+		result := errorCLIResponse("operation_failed", err.Error())
+		var commandErr *cliCommandError
+		if errors.As(err, &commandErr) {
+			result.Code = commandErr.Code
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			result.Code = "timeout"
+		} else if errors.Is(err, context.Canceled) {
+			result.Code = "canceled"
+		}
+		result.Data = response.Data
+		if job.ID != "" {
+			result.Data, _ = json.Marshal(job)
+		}
+		return result
+	}
+	response.Data, _ = json.Marshal(job)
 	return response
 }
 
@@ -151,9 +186,21 @@ func recoverInterruptedControlOperations(ctx context.Context, db *sql.DB) error 
 	if err != nil {
 		return err
 	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = db.ExecContext(ctx, `
+		UPDATE control_operations SET status='succeeded',updated_at=?,
+			response_json=(SELECT json_object('ok',json('true'),'data',json_object(
+				'id',j.id,'type',j.type,'lockKey',j.lock_key,'status',j.status,'progress',j.progress,'message',j.message))
+				FROM jobs j WHERE j.control_request_id=control_operations.id)
+		WHERE command='deployment.publish' AND status='running'
+			AND EXISTS (SELECT 1 FROM jobs j WHERE j.control_request_id=control_operations.id)
+	`, now)
+	if err != nil {
+		return fmt.Errorf("recover queued publish receipts: %w", err)
+	}
 	_, err = db.ExecContext(ctx, `
 		UPDATE control_operations SET status='failed', response_json=?, updated_at=? WHERE status='running'
-	`, string(response), time.Now().UTC().Format(time.RFC3339Nano))
+	`, string(response), now)
 	if err != nil {
 		return fmt.Errorf("recover control operations: %w", err)
 	}

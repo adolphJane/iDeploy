@@ -46,11 +46,16 @@ func (r *Remote) TagImageWithAgent(ctx context.Context, connection Connection, s
 	return err
 }
 
-func (r *Remote) DeployContainerWithAgent(ctx context.Context, connection Connection, serverID, jobID, name, image, restartPolicy string, ports []string, labels, environment map[string]string) (ContainerReplacement, error) {
+func (r *Remote) DeployContainerWithAgent(ctx context.Context, connection Connection, serverID, jobID, name, image, restartPolicy string, ports []string, labels, environment map[string]string, mounts ...ContainerMountSpec) (ContainerReplacement, error) {
 	id := AgentStageID(jobID, "container.deploy:"+name)
 	request := map[string]any{"id": id, "kind": "container.deploy", "containerId": name, "image": image, "restartPolicy": restartPolicy, "ports": ports, "labels": labels, "environment": environment}
-	result, err := r.runAgentOperation(ctx, connection, serverID, id, "container.deploy", request, func() (json.RawMessage, error) {
-		replacement, err := r.DeployContainer(ctx, connection, name, image, restartPolicy, ports, labels, environment)
+	capability := "container.deploy"
+	if len(mounts) != 0 {
+		request["mounts"] = mounts
+		capability = "container.deploy.mounts"
+	}
+	result, err := r.runAgentOperation(ctx, connection, serverID, id, capability, request, func() (json.RawMessage, error) {
+		replacement, err := r.DeployContainer(ctx, connection, name, image, restartPolicy, ports, labels, environment, mounts...)
 		if err != nil {
 			return nil, err
 		}

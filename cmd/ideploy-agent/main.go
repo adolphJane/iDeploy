@@ -91,7 +91,7 @@ func main() {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"apiVersion": apiVersion, "binarySHA256": binaryHash, "os": runtime.GOOS, "arch": runtime.GOARCH, "capabilities": []string{"system.metrics", "system.inventory", "container.logs", "container.control", "container.deploy", "image.pull", "image.tag", "compose.deploy", "nginx.scan", "nginx.apply", "certbot.preflight", "certbot.issue", "certbot.renew"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"apiVersion": apiVersion, "binarySHA256": binaryHash, "os": runtime.GOOS, "arch": runtime.GOARCH, "capabilities": []string{"system.metrics", "system.inventory", "container.logs", "container.control", "container.deploy", "container.deploy.mounts", "image.pull", "image.tag", "compose.deploy", "nginx.scan", "nginx.apply", "certbot.preflight", "certbot.issue", "certbot.renew"}})
 	}))
 	mux.HandleFunc("/v1/metrics", auth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

@@ -232,12 +232,16 @@ func (s *Store) CreateRelease(ctx context.Context, input ReleaseInput) (Release,
 	if input.RollbackToID != "" {
 		rollbackToID = input.RollbackToID
 	}
-	var environmentRevision int64
-	if err := tx.QueryRowContext(ctx, "SELECT environment_revision FROM deployment_targets WHERE id=?", input.DeploymentID).Scan(&environmentRevision); err != nil {
+	var environmentRevision, runtimeRevision int64
+	if err := tx.QueryRowContext(ctx, `SELECT d.environment_revision,COALESCE(p.revision,0)
+		FROM deployment_targets d LEFT JOIN deployment_runtime_policies p ON p.deployment_id=d.id WHERE d.id=?`, input.DeploymentID).Scan(&environmentRevision, &runtimeRevision); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Release{}, ErrNotFound
 		}
 		return Release{}, err
+	}
+	if input.ExpectedPolicyRevision != nil && *input.ExpectedPolicyRevision != runtimeRevision {
+		return Release{}, ErrRuntimePolicyConflict
 	}
 	manifestEnvelope, err := sealManifest(ctx, input.Manifest)
 	if err != nil {
@@ -252,6 +256,13 @@ func (s *Store) CreateRelease(ctx context.Context, input ReleaseInput) (Release,
 		"", manifestEnvelope, rollbackToID, ReleaseQueued, environmentRevision, now, input.BuildMode)
 	if err != nil {
 		return Release{}, fmt.Errorf("create deployment release: %w", err)
+	}
+	policySourceID := input.PolicySourceID
+	if policySourceID == "" {
+		policySourceID = input.RollbackToID
+	}
+	if err := snapshotRuntimePolicy(ctx, tx, id, input.DeploymentID, policySourceID, input.Action == "rollback"); err != nil {
+		return Release{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return Release{}, err

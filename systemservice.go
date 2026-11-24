@@ -348,13 +348,15 @@ type DeploymentInput struct {
 }
 
 type DeploymentReleaseInput struct {
-	DeploymentID  string `json:"deploymentId"`
-	RegistryID    string `json:"registryId"`
-	Version       string `json:"version"`
-	FQDN          string `json:"fqdn"`
-	PathPrefix    string `json:"pathPrefix"`
-	ServiceName   string `json:"serviceName"`
-	ContainerPort int    `json:"containerPort"`
+	ExpectedPolicyRevision *int64 `json:"policyRevision,omitempty"`
+	controlRequestID       string
+	DeploymentID           string `json:"deploymentId"`
+	RegistryID             string `json:"registryId"`
+	Version                string `json:"version"`
+	FQDN                   string `json:"fqdn"`
+	PathPrefix             string `json:"pathPrefix"`
+	ServiceName            string `json:"serviceName"`
+	ContainerPort          int    `json:"containerPort"`
 }
 
 type DeploymentVersionSuggestionView struct {

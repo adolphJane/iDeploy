@@ -21,32 +21,34 @@ import (
 )
 
 type cliRequest struct {
-	Command               string                            `json:"command"`
-	NativeMethod          string                            `json:"nativeMethod,omitempty"`
-	NativeArgs            []json.RawMessage                 `json:"nativeArgs,omitempty"`
-	RequestID             string                            `json:"requestId,omitempty"`
-	ID                    string                            `json:"id,omitempty"`
-	Project               *ProjectInput                     `json:"project,omitempty"`
-	ProjectPatch          *ProjectPatchInput                `json:"projectPatch,omitempty"`
-	Deployment            *DeploymentInput                  `json:"deployment,omitempty"`
-	DeploymentPatch       *DeploymentPatchInput             `json:"deploymentPatch,omitempty"`
-	DeploymentEnvironment *DeploymentEnvironmentUpdateInput `json:"deploymentEnvironment,omitempty"`
-	DeploymentSecretName  string                            `json:"deploymentSecretName,omitempty"`
-	BuildProxy            *BuildProxySettingsInput          `json:"buildProxy,omitempty"`
-	RegistryID            string                            `json:"registryId,omitempty"`
-	Version               string                            `json:"version,omitempty"`
-	FQDN                  string                            `json:"fqdn,omitempty"`
-	PathPrefix            string                            `json:"pathPrefix,omitempty"`
-	ServiceName           string                            `json:"serviceName,omitempty"`
-	ContainerPort         int                               `json:"containerPort,omitempty"`
-	ReleaseID             string                            `json:"releaseId,omitempty"`
-	DeploymentID          string                            `json:"deploymentId,omitempty"`
-	ContainerID           string                            `json:"containerId,omitempty"`
-	Ports                 []int                             `json:"ports,omitempty"`
-	Tail                  int                               `json:"tail,omitempty"`
-	Limit                 int                               `json:"limit,omitempty"`
-	Wait                  bool                              `json:"wait,omitempty"`
-	TimeoutMS             int64                             `json:"timeoutMs,omitempty"`
+	DeploymentRuntimePolicy *DeploymentRuntimePolicyInput     `json:"deploymentRuntimePolicy,omitempty"`
+	ExpectedPolicyRevision  *int64                            `json:"policyRevision,omitempty"`
+	Command                 string                            `json:"command"`
+	NativeMethod            string                            `json:"nativeMethod,omitempty"`
+	NativeArgs              []json.RawMessage                 `json:"nativeArgs,omitempty"`
+	RequestID               string                            `json:"requestId,omitempty"`
+	ID                      string                            `json:"id,omitempty"`
+	Project                 *ProjectInput                     `json:"project,omitempty"`
+	ProjectPatch            *ProjectPatchInput                `json:"projectPatch,omitempty"`
+	Deployment              *DeploymentInput                  `json:"deployment,omitempty"`
+	DeploymentPatch         *DeploymentPatchInput             `json:"deploymentPatch,omitempty"`
+	DeploymentEnvironment   *DeploymentEnvironmentUpdateInput `json:"deploymentEnvironment,omitempty"`
+	DeploymentSecretName    string                            `json:"deploymentSecretName,omitempty"`
+	BuildProxy              *BuildProxySettingsInput          `json:"buildProxy,omitempty"`
+	RegistryID              string                            `json:"registryId,omitempty"`
+	Version                 string                            `json:"version,omitempty"`
+	FQDN                    string                            `json:"fqdn,omitempty"`
+	PathPrefix              string                            `json:"pathPrefix,omitempty"`
+	ServiceName             string                            `json:"serviceName,omitempty"`
+	ContainerPort           int                               `json:"containerPort,omitempty"`
+	ReleaseID               string                            `json:"releaseId,omitempty"`
+	DeploymentID            string                            `json:"deploymentId,omitempty"`
+	ContainerID             string                            `json:"containerId,omitempty"`
+	Ports                   []int                             `json:"ports,omitempty"`
+	Tail                    int                               `json:"tail,omitempty"`
+	Limit                   int                               `json:"limit,omitempty"`
+	Wait                    bool                              `json:"wait,omitempty"`
+	TimeoutMS               int64                             `json:"timeoutMs,omitempty"`
 }
 
 type cliResponse struct {
@@ -311,6 +313,15 @@ func executeCLIRequest(ctx context.Context, service *SystemService, request cliR
 		value, err = service.GetPreflightProgress(request.ID)
 	case "deployment.runtime":
 		value, err = service.InspectDeploymentRuntime(request.ID)
+	case "deployment.policy.get":
+		value, err = service.GetDeploymentRuntimePolicy(request.ID)
+		if request.DeploymentRuntimePolicy == nil {
+			err = &cliCommandError{Code: "invalid_request", Message: "deployment runtime policy is required"}
+		} else {
+			value, err = service.UpdateDeploymentRuntimePolicy(*request.DeploymentRuntimePolicy)
+		}
+	case "release.runtime_verification":
+		value, err = service.GetReleaseRuntimeVerification(request.ID)
 	case "deployment.environment.list":
 		value, err = service.ListDeploymentEnvironment(request.ID)
 	case "deployment.environment.update":
@@ -322,7 +333,7 @@ func executeCLIRequest(ctx context.Context, service *SystemService, request cliR
 	case "deployment.environment.secret.prompt":
 		value, err = service.PromptDeploymentSecret(DeploymentSecretPromptInput{DeploymentID: request.ID, Name: request.DeploymentSecretName})
 	case "deployment.publish":
-		value, err = service.PublishDeployment(DeploymentReleaseInput{DeploymentID: request.ID, RegistryID: request.RegistryID, Version: request.Version, FQDN: request.FQDN, PathPrefix: request.PathPrefix, ServiceName: request.ServiceName, ContainerPort: request.ContainerPort})
+		value, err = service.PublishDeployment(DeploymentReleaseInput{DeploymentID: request.ID, RegistryID: request.RegistryID, Version: request.Version, FQDN: request.FQDN, PathPrefix: request.PathPrefix, ServiceName: request.ServiceName, ContainerPort: request.ContainerPort, ExpectedPolicyRevision: request.ExpectedPolicyRevision, controlRequestID: request.RequestID})
 		value, err = waitForCLIJobIfNeeded(ctx, service, value, err, request.Wait)
 	case "deployment.rollback":
 		value, err = service.RollbackDeployment(request.ID, request.ReleaseID)

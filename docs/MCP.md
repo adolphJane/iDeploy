@@ -256,3 +256,11 @@ ideploy deployment env set-secret <deployment-id> DATABASE_PASSWORD
 MCP Server 是当前 macOS 用户的本地 stdio 服务，不监听 TCP 端口。它依赖本机进程权限、Unix Socket 权限和已有 Keychain 访问控制。
 
 工具安全标记用于客户端确认和模型决策，不构成独立的服务端人工审批。当前版本适用于用户主动配置并信任的本机 MCP 客户端；正式环境的强制双阶段审批和发布幂等键仍属于后续加固范围。
+
+### 发布策略与运行验收
+
+使用 `inspect_deployment_runtime` 查看匹配部署的容器版本、镜像 ID、实际挂载与数据目录检查结果。使用 `get_deployment_runtime_policy` 查看当前策略修订，用独立的 `update_deployment_runtime_policy` 调整规则。发布结果可通过 `get_release_runtime_verification` 查看。
+
+`publish_deployment` 支持 `policy_revision` 和 `request_id`。前者对应预检返回的策略修订，后者用于断线后取回原发布 Job。支持 MCP Prompts 的客户端可选择 `ideploy_release`；支持 Agent Skills 的客户端可安装仓库中的 `.agents/skills/ideploy-release`。
+
+完整的策略配置与 IFX 开发机验收步骤见 [发布策略与验收](RELEASE_POLICY.md)。

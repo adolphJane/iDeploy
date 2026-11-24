@@ -38,11 +38,13 @@ type DeploymentPreflightCheckView struct {
 }
 
 type DeploymentPreflightView struct {
-	OK             bool                           `json:"ok"`
-	DeploymentID   string                         `json:"deploymentId"`
-	Checks         []DeploymentPreflightCheckView `json:"checks"`
-	BaseImages     []string                       `json:"baseImages"`
-	SuggestedPorts []int                          `json:"suggestedPorts"`
+	RuntimePolicyRevision int64                          `json:"runtimePolicyRevision"`
+	RuntimeChecks         []deployment.RuntimeCheck      `json:"runtimeChecks,omitempty"`
+	OK                    bool                           `json:"ok"`
+	DeploymentID          string                         `json:"deploymentId"`
+	Checks                []DeploymentPreflightCheckView `json:"checks"`
+	BaseImages            []string                       `json:"baseImages"`
+	SuggestedPorts        []int                          `json:"suggestedPorts"`
 }
 
 type DeploymentPreflightProgressView struct {
@@ -351,6 +353,26 @@ func (s *SystemService) PreflightDeployment(input DeploymentPreflightInput) (Dep
 		return view, nil
 	}
 	add("remote_runtime", "ok", fmt.Sprintf("已读取 %d 个远程容器", len(containers)))
+	policy, err := deployments.RuntimePolicy(ctx, target.ID)
+	if err != nil {
+		add("runtime_policy", "failed", err.Error())
+	} else {
+		view.RuntimePolicyRevision = policy.Revision
+		if err := s.verifySharedRuntimePolicy(ctx, target, policy); err != nil {
+			add("runtime_policy", "failed", err.Error())
+		} else if policy.Revision != 0 {
+			view.RuntimeChecks = checkRuntimeBaseline(ctx, remote, host, target, policy, containers)
+			if err := runtimeCheckFailure(view.RuntimeChecks); err != nil {
+				level := "warning"
+				if policy.Mode == deployment.RuntimeEnforce {
+					level = "failed"
+				}
+				add("runtime_policy", level, err.Error())
+			} else {
+				add("runtime_policy", "ok", fmt.Sprintf("已检查运行与持久化策略修订 %d", policy.Revision))
+			}
+		}
+	}
 
 	if target.WorkloadKind == "container" {
 		ports := target.ContainerPorts

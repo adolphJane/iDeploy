@@ -25,6 +25,16 @@ func (s *SystemService) deployAndCheckCompose(ctx context.Context, store *deploy
 		return fmt.Errorf("检查 Compose 项目的当前状态: %w", err)
 	}
 	before := deployment.Match(target, containers)
+	policy, err := publicationRuntimePolicy(ctx, store, target, release)
+	if err != nil {
+		return err
+	}
+	if err := s.verifySharedRuntimePolicy(ctx, target, policy); err != nil {
+		return err
+	}
+	if err := checkPublicationBefore(ctx, store, remote, host, target, release, policy, containers, manifest); err != nil {
+		return err
+	}
 	if previous.ID != "" && previous.ImageRef != "compose:"+target.WorkloadName+":"+previous.Version {
 		previous = deployment.Release{}
 	}

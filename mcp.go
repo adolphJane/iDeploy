@@ -22,7 +22,7 @@ const (
 	mcpMaximumTimeout   = 24 * time.Hour
 )
 
-const mcpInstructions = `Use list tools to resolve project, server, domain, deployment, registry, release, and job IDs before referencing existing resources. Project, deployment, deployment-environment, and build-proxy configuration tools only save local iDeploy configuration; they do not publish or change remote workloads. Supply a stable request_id for configuration writes and use get_operation after operation_pending or an uncertain local-control timeout. Use list_internal_ingresses to choose a ready HTTPS ingress on the deployment server. Run preflight_deployment before publishing with the same domain, path, container_port, and optional service_name as publish_deployment; supply a unique request_id and call get_preflight_progress to observe a long-running check. Publishing automatically uses the global build proxy policy returned by get_build_proxy_settings and blocks known host-port conflicts before building. Plain deployment environment variables may be managed through MCP; use request_deployment_secret_input for secrets so their values are entered in a local hidden-input dialog and never pass through MCP. A single-container restart recreates the container to apply current runtime configuration. Remote workload and server Agent mutation tools must only be called after the user explicitly requests the exact action. retry_release safely rebuilds failures without an artifact and directly resumes deployment when an immutable pushed artifact was retained. Do not automatically retry other mutations after a timeout; inspect list_jobs or get_job first. Never request, expose, or return registry credentials, SSH credentials, deployment secrets, or Keychain values. Asynchronous operations require iDeploy.app to be running; otherwise use the default wait=true behavior.`
+const mcpInstructions = `Use list tools to resolve project, server, domain, deployment, registry, release, and job IDs before referencing existing resources. Project, deployment, deployment-environment, and build-proxy configuration tools only save local iDeploy configuration; they do not publish or change remote workloads. Supply a stable request_id for configuration writes and use get_operation after operation_pending or an uncertain local-control timeout. Use list_internal_ingresses to choose a ready HTTPS ingress on the deployment server. Run preflight_deployment before publishing with the same domain, path, container_port, and optional service_name as publish_deployment; supply a unique request_id and call get_preflight_progress to observe a long-running check. Use the preflight runtimePolicyRevision as policy_revision in publish_deployment. Give each publish a stable request_id, then use the same ID to recover its job receipt. Read get_release_runtime_verification and inspect_deployment_runtime for image and storage evidence. Change the deployment runtime policy only when explicitly requested. Publishing automatically uses the global build proxy policy returned by get_build_proxy_settings and blocks known host-port conflicts before building. Plain deployment environment variables may be managed through MCP; use request_deployment_secret_input for secrets so their values are entered in a local hidden-input dialog and never pass through MCP. A single-container restart recreates the container to apply current runtime configuration. Remote workload and server Agent mutation tools must only be called after the user explicitly requests the exact action. retry_release safely rebuilds failures without an artifact and directly resumes deployment when an immutable pushed artifact was retained. Do not automatically retry other mutations after a timeout; inspect list_jobs or get_job first. Never request, expose, or return registry credentials, SSH credentials, deployment secrets, or Keychain values. Asynchronous operations require iDeploy.app to be running; otherwise use the default wait=true behavior.`
 
 type mcpRequestExecutor func(context.Context, cliRequest) cliResponse
 
@@ -197,6 +197,8 @@ type mcpDeploymentOperationInput struct {
 }
 
 type mcpPublishInput struct {
+	RequestID      string `json:"request_id,omitempty" jsonschema:"stable idempotency key; reuse to retrieve the same job after a timeout"`
+	PolicyRevision *int64 `json:"policy_revision,omitempty" jsonschema:"policy revision reported by publish preflight"`
 	DeploymentID   string `json:"deployment_id" jsonschema:"stable deployment identifier returned by list_deployments"`
 	RegistryID     string `json:"registry_id" jsonschema:"stable registry identifier returned by list_registries"`
 	Version        string `json:"version,omitempty" jsonschema:"optional release version; iDeploy generates one when omitted"`
@@ -259,6 +261,8 @@ func newIDeployMCPServer(execute mcpRequestExecutor, logWriter io.Writer) *mcp.S
 	service := &mcpService{execute: execute}
 	registerMCPReadTools(server, service)
 	registerMCPMutationTools(server, service)
+	registerReleasePolicyTools(server, service)
+	registerReleasePrompt(server)
 	return server
 }
 
@@ -435,9 +439,9 @@ func registerMCPReadTools(server *mcp.Server, service *mcpService) {
 	}, "Returned deployment preflight progress.")
 
 	registerMCPCommandTool(server, service, &mcp.Tool{
-		Name: "inspect_deployment_runtime", Description: "Refresh and return the remote containers, image, ports, state, and health matched to one deployment configuration.",
+		Name: "inspect_deployment_runtime", Description: "Read the scoped containers, deployed version, image identity, mount metadata and registered data directory checks.",
 		Annotations: mcpReadAnnotations("Inspect deployment runtime", true),
-	}, mcpReadTimeout, func(input mcpDeploymentInput) (cliRequest, error) {
+	}, 90*time.Second, func(input mcpDeploymentInput) (cliRequest, error) {
 		if err := requireMCPValue("deployment_id", input.DeploymentID); err != nil {
 			return cliRequest{}, err
 		}
@@ -734,7 +738,7 @@ func registerMCPMutationTools(server *mcp.Server, service *mcpService) {
 			return cliRequest{}, err
 		}
 		return cliRequest{
-			Command: "deployment.publish", ID: strings.TrimSpace(input.DeploymentID),
+			Command: "deployment.publish", ID: strings.TrimSpace(input.DeploymentID), RequestID: strings.TrimSpace(input.RequestID), ExpectedPolicyRevision: input.PolicyRevision,
 			RegistryID: strings.TrimSpace(input.RegistryID), Version: strings.TrimSpace(input.Version),
 			FQDN: strings.TrimSpace(input.FQDN), PathPrefix: strings.TrimSpace(input.PathPrefix), ServiceName: strings.TrimSpace(input.ServiceName), ContainerPort: input.ContainerPort,
 			Wait: mcpWait(input.Wait), TimeoutMS: timeout.Milliseconds(),

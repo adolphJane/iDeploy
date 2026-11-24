@@ -413,6 +413,9 @@ func (s *SystemService) deploymentReleaseHandler(ctx context.Context, task job.J
 	if err != nil {
 		return err
 	}
+	if _, err := publicationRuntimePolicy(ctx, deployments, target, release); err != nil {
+		return err
+	}
 	if err := s.validateReleasePathReady(ctx, release.ID, target.ServerID); err != nil {
 		return err
 	}
@@ -716,6 +719,26 @@ func (s *SystemService) deployAndCheckContainer(ctx context.Context, deployments
 		return err
 	}
 	target = currentTarget
+	policy, err := publicationRuntimePolicy(ctx, deployments, target, release)
+	if err != nil {
+		return err
+	}
+	if err := s.verifySharedRuntimePolicy(ctx, target, policy); err != nil {
+		return err
+	}
+	containers, err := remote.ListContainers(ctx, host)
+	if err != nil {
+		return fmt.Errorf("读取替换前的容器状态: %w", err)
+	}
+	if policy.Revision != 0 {
+		if err := checkPublicationBefore(ctx, deployments, remote, host, target, release, policy, containers, ""); err != nil {
+			return err
+		}
+	}
+	mounts, err := singleContainerMounts(ctx, remote, host, target, policy, containers)
+	if err != nil {
+		return err
+	}
 	basePath, err := s.releaseBasePath(ctx, release)
 	if err != nil {
 		return err
@@ -734,7 +757,7 @@ func (s *SystemService) deployAndCheckContainer(ctx context.Context, deployments
 		"com.ideploy.release-id":           release.ID,
 		"com.ideploy.version":              release.Version,
 		"com.ideploy.environment-revision": fmt.Sprint(target.EnvironmentRevision),
-	}, environment)
+	}, environment, mounts...)
 	if err != nil {
 		return err
 	}
@@ -791,6 +814,9 @@ func (s *SystemService) finishReleaseHealthCheck(ctx context.Context, deployment
 	reporter.Progress(86, "正在检查远端服务健康状态")
 	containers, count, err := waitReleaseHealth(ctx, server.NewRemote(), host, target)
 	if err != nil {
+		return err
+	}
+	if err := checkPublicationAfter(ctx, deployments, server.NewRemote(), host, target, release, containers, imageRef, manifest); err != nil {
 		return err
 	}
 	if onHealthy != nil {

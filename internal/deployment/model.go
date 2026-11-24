@@ -131,16 +131,18 @@ func ValidateEnvironmentName(name string) (string, error) {
 func NewEnvironmentVariableID() (string, error) { return newID() }
 
 type ReleaseInput struct {
-	BuildMode    BuildMode
-	DeploymentID string
-	RegistryID   string
-	Action       string
-	Version      string
-	ImageRef     string
-	Manifest     string
-	RollbackToID string
-	AllowRetry   bool
-	AllowResume  bool
+	ExpectedPolicyRevision *int64
+	PolicySourceID         string
+	BuildMode              BuildMode
+	DeploymentID           string
+	RegistryID             string
+	Action                 string
+	Version                string
+	ImageRef               string
+	Manifest               string
+	RollbackToID           string
+	AllowRetry             bool
+	AllowResume            bool
 }
 
 func (input Input) Validate() (Input, error) {
