@@ -3,6 +3,7 @@ import SwiftUI
 private struct DatabaseFormRequest: Identifiable {
     let id = UUID()
     let connection: J?
+    var instance: J? = nil
 }
 
 private struct CreateRemoteDatabaseSheet: View {
@@ -80,6 +81,9 @@ private struct CreateRemoteDatabaseSheet: View {
 struct DatabasesPage: View {
     @EnvironmentObject private var model: AppModel
     @State private var selectedID: String?
+    @State private var environmentFilter = ""
+    @State private var showingInstances = false
+    @State private var pendingConnectionInstance: J?
     @State private var schema = ""
     @State private var schemas: [J] = []
     @State private var tables: [J] = []
@@ -100,14 +104,22 @@ struct DatabasesPage: View {
     @State private var loadingSchemas = false
     @State private var loadingTables = false
 
-    private var selected: J? { model.databases.first { $0.id == selectedID } }
+    private var visibleConnections: [J] {
+        model.databases.filter { environmentFilter.isEmpty || $0.deploymentEnvironment == environmentFilter }
+    }
+
+    private var selected: J? { visibleConnections.first { $0.id == selectedID } }
 
     var body: some View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
                 HStack {
-                    WorkspaceListHeader(title: "数据库", count: model.databases.count)
+                    WorkspaceListHeader(title: "数据库", count: visibleConnections.count)
                     Spacer()
+                    Button { showingInstances = true } label: { Image(systemName: "server.rack") }
+                        .buttonStyle(DeploySecondaryButtonStyle())
+                        .help("管理数据库实例")
+                        .accessibilityLabel("管理数据库实例")
                     Button { formRequest = DatabaseFormRequest(connection: nil) } label: { Image(systemName: "plus") }
                         .buttonStyle(DeploySecondaryButtonStyle())
                         .help("添加数据库")
@@ -115,9 +127,21 @@ struct DatabasesPage: View {
                 .padding(14)
                 .background(DeployStyle.overviewHeader)
                 Rectangle().fill(DeployStyle.line).frame(height: 1)
+                Picker("数据库环境", selection: $environmentFilter) {
+                    Text("全部").tag("")
+                    ForEach(DeploymentEnvironmentLabel.values, id: \.self) { value in
+                        Text(DeploymentEnvironmentLabel.name(value)).tag(value)
+                    }
+                }
+                .pickerStyle(.menu)
+                .padding(.horizontal, 14)
+                .padding(.top, 10)
+                .onChange(of: environmentFilter) { _ in
+                    if selected == nil { selectedID = nil }
+                }
                 ScrollView(.vertical, showsIndicators: false) {
                     LazyVStack(spacing: 5) {
-                        ForEach(model.databases, id: \.id) { connection in
+                        ForEach(visibleConnections, id: \.id) { connection in
                             let isSelected = selectedID == connection.id
                             Button {
                                 selectedID = connection.id
@@ -133,7 +157,7 @@ struct DatabasesPage: View {
                                             .font(.system(size: 12, weight: .semibold))
                                             .foregroundStyle(DeployStyle.ink)
                                             .lineLimit(1)
-                                        Text("\(connection["host"].string):\(connection["port"].string)")
+                                        Text("\(connection.deploymentEnvironmentLabel) · \(connection["host"].string):\(connection["port"].string)")
                                             .font(.system(size: 10, design: .monospaced))
                                             .foregroundStyle(DeployStyle.muted)
                                             .lineLimit(1)
@@ -187,6 +211,7 @@ struct DatabasesPage: View {
                     VStack(alignment: .leading, spacing: 14) {
                         SectionHeading("连接信息", "远程数据库与只读访问账号")
                         HStack(spacing: 24) {
+                            databaseDetail("环境", connection.deploymentEnvironmentLabel)
                             databaseDetail("主机地址", "\(connection["host"].string):\(connection["port"].string)")
                             databaseDetail("登录用户", connection["username"].string)
                             databaseDetail("TLS", connection["sslMode"].string == "disable" ? "未启用" : "已启用")
@@ -252,8 +277,20 @@ struct DatabasesPage: View {
             }
         }
         .environment(\.colorScheme, .light)
+        .sheet(isPresented: $showingInstances, onDismiss: {
+            if let instance = pendingConnectionInstance {
+                formRequest = DatabaseFormRequest(connection: nil, instance: instance)
+                pendingConnectionInstance = nil
+            }
+        }) {
+            ManagedDatabasesView { instance in
+                pendingConnectionInstance = instance
+                showingInstances = false
+            }
+            .environmentObject(model)
+        }
         .sheet(item: $formRequest) { request in
-            DatabaseFormView(connection: request.connection)
+            DatabaseFormView(connection: request.connection, instance: request.instance)
                 .environmentObject(model)
                 .id(request.id)
         }
@@ -680,20 +717,22 @@ struct DatabaseFormView: View {
     @State private var username: String
     @State private var password = ""
     @State private var sslMode: String
+    @State private var deploymentEnvironment: String
     @State private var testMessage = ""
     @State private var testSucceeded = false
     @State private var isTesting = false
     @State private var isSaving = false
 
-    init(connection: J?) {
+    init(connection: J?, instance: J? = nil) {
         self.connection = connection
-        _name = State(initialValue: connection?["name"].string ?? "")
-        _driver = State(initialValue: connection?["driver"].string ?? "postgres")
-        _host = State(initialValue: connection?["host"].string ?? "")
-        _port = State(initialValue: connection?["port"].string ?? "5432")
-        _databaseName = State(initialValue: connection?["databaseName"].string ?? "")
-        _username = State(initialValue: connection?["username"].string ?? "")
-        _sslMode = State(initialValue: connection?["sslMode"].string ?? "require")
+        _name = State(initialValue: (connection ?? instance)?["name"].string ?? "")
+        _driver = State(initialValue: (connection ?? instance)?["driver"].string ?? "postgres")
+        _host = State(initialValue: connection?["host"].string ?? instance?["listenIp"].string ?? "")
+        _port = State(initialValue: (connection ?? instance)?["port"].string ?? "5432")
+        _databaseName = State(initialValue: (connection ?? instance)?["databaseName"].string ?? "")
+        _username = State(initialValue: connection?["username"].string ?? instance?["appUsername"].string ?? "")
+        _sslMode = State(initialValue: connection?["sslMode"].string ?? (instance == nil ? "require" : "disable"))
+        _deploymentEnvironment = State(initialValue: (connection ?? instance)?.deploymentEnvironment ?? "default")
     }
 
     private var input: [String: Any] {
@@ -704,7 +743,7 @@ struct DatabaseFormView: View {
          "databaseName": databaseName.trimmingCharacters(in: .whitespacesAndNewlines),
          "username": username.trimmingCharacters(in: .whitespacesAndNewlines),
          "password": password,
-         "sslMode": sslMode]
+         "sslMode": sslMode, "environment": deploymentEnvironment]
     }
 
     private var canSave: Bool {
@@ -801,6 +840,11 @@ struct DatabaseFormView: View {
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(DeployStyle.ink)
                             Spacer()
+                            Picker("环境", selection: $deploymentEnvironment) {
+                                ForEach(DeploymentEnvironmentLabel.values, id: \.self) { value in
+                                    Text(DeploymentEnvironmentLabel.name(value)).tag(value)
+                                }
+                            }
                             Picker("TLS 加密", selection: $sslMode) {
                                 Text("要求加密").tag("require")
                                 Text("关闭").tag("disable")

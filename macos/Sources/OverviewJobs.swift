@@ -11,6 +11,7 @@ private enum JobPresentation {
         case "deployment.release": "项目发布"
         case "deployment.rollback": "版本回滚"
         case "deployment.resume": "继续发布"
+        case "database.instance": "数据库实例操作"
         case "domain.binding.apply": "应用域名入口"
         case "domain.binding.remove": "解除域名入口"
         default: type.isEmpty ? "后台任务" : type
@@ -68,7 +69,7 @@ private enum JobPresentation {
         case "server":
             return model.servers.first { $0.id == parts[1] }.map { "服务器：\($0["name"].string)" }
         case "deployment":
-            return model.deployments.first { $0.id == parts[1] }.map { "部署：\($0["projectName"].string)" }
+            return model.deployments.first { $0.id == parts[1] }.map { "部署：\($0.deploymentDisplayName)" }
         case "registry":
             return model.registries.first { $0.id == parts[1] }.map { "仓库：\($0["name"].string)" }
         case "project":
@@ -190,6 +191,14 @@ struct JobDetailSheet: View {
                         Rectangle().fill(DeployStyle.line).frame(height: 1)
                         detailRow("任务类型", current["type"].string)
                         detailRow("任务 ID", current.id)
+                        let targetName = current["targetName"].string
+                        if !targetName.isEmpty {
+                            let environment = current["environment"].string
+                            Text(environment.isEmpty || environment == "default" ? targetName :
+                                 targetName + " · " + DeploymentEnvironmentLabel.name(environment))
+                                .font(.caption)
+                                .foregroundStyle(DeployStyle.muted)
+                        }
                         if let resource = JobPresentation.resourceName(current["lockKey"].string, model: model) {
                             detailRow("关联资源", resource)
                         }

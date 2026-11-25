@@ -305,6 +305,9 @@ func (s *SystemService) resolveDeploymentEnvironmentRevision(ctx context.Context
 		if err != nil {
 			return deployment.Target{}, nil, err
 		}
+		if err := s.addDeploymentDatabaseVariables(ctx, before, environment); err != nil {
+			return deployment.Target{}, nil, err
+		}
 		after, err := store.Get(ctx, deploymentID)
 		if err != nil {
 			return deployment.Target{}, nil, err

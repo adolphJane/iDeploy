@@ -10,12 +10,21 @@ iDeploy 是面向 macOS 的单用户 Docker 交付与远程运维桌面应用。
 - 单容器发布使用项目 Dockerfile 和目标镜像，运行端口与重启策略保存在部署配置中；端口可只填写外部端口，发布时会根据 Dockerfile 的 `EXPOSE` 自动补全内部端口；
 - Compose 发布要求 `image` 使用 `${IMAGE_TAG}`，发布时保存 Compose 快照以保证历史版本可重放；
 - Harbor / OCI 用户名保存在 SQLite，密码或 Token 保存在 macOS Keychain；
+- 部署页支持同一项目的测试和线上环境。两套环境分别选服务器、访问入口、数据库和发布版本。
 - “数据库”页可使用独立的只读 PostgreSQL、MySQL / MariaDB 账号查看远程 Schema、表、字段、索引和受限分页数据；连接密码仅保存在 macOS Keychain；
 - 镜像仓库登录通过标准输入完成，不把密码写入任务参数或命令行；
 - 可配置 iDeploy 专用 BuildKit Builder，将 Docker Hub、GHCR 等基础镜像统一映射到 Harbor Proxy Cache；MCP 发布自动继承全局代理策略；
 - MCP 支持幂等配置更新、项目验证、部署配置克隆、发布前检查，以及失败版本按原版本重建或复用已推送 Digest 继续部署；
 - 单容器在服务端按 Digest 拉取和校验，再以本地版本 Tag 启动，兼顾确定性发布与可读的 `docker ps` 镜像名称；
 - 发布与回滚由服务器级互斥任务执行，完成后核对 Docker 运行状态和容器健康检查。
+
+## 测试与线上环境
+
+在「部署」页编辑已有部署，选择测试或线上环境并保存，再用「添加测试环境」或「添加线上环境」创建另一目标。已有发布记录随原部署保留。共享工作区应先升级 iDeploy 客户端和共享服务，再配置双环境。
+
+在「数据库」页给连接指定环境，然后在应用部署表单绑定同环境连接。发布预检从应用服务器检查数据库 TCP 端口。绑定后的单容器获得 `IDEPLOY_DATABASE_HOST`、`IDEPLOY_DATABASE_PORT` 和 `IDEPLOY_DATABASE_NAME`，应用账号和密码通过该部署的环境变量配置。Compose 项目在自己的配置中填写数据库连接参数。
+
+从数据库列表上方进入「管理数据库实例」，可以在各自的服务器部署 PostgreSQL 17 或 MySQL 8.4。实例使用私网监听地址和 Docker 持久卷，初始化时创建业务库及独立应用账号。实例配置与备份目录由发起操作的桌面管理，逻辑备份保存到该服务器用户目录下的 `.ideploy/databases/<实例 ID>/backups/`。恢复目标为同服务器、同环境、同引擎版本和同库名的新实例，还需使用相同的应用账号。应用回滚与数据库恢复分别提交。支撑引擎初始化和挂载的官方说明见 [PostgreSQL 镜像说明](https://hub.docker.com/_/postgres) 与 [MySQL 镜像说明](https://hub.docker.com/_/mysql)。
 
 ## Dockerfile 智能生成
 

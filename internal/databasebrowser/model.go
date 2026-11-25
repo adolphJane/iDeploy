@@ -11,6 +11,8 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"ideploy/internal/platform/environment"
 )
 
 type Driver string
@@ -21,6 +23,7 @@ const (
 )
 
 type Connection struct {
+	Environment   string
 	ID            string
 	Name          string
 	Driver        Driver
@@ -37,6 +40,7 @@ type Connection struct {
 }
 
 type NewConnection struct {
+	Environment   string
 	Name          string
 	Driver        Driver
 	Host          string
@@ -48,6 +52,11 @@ type NewConnection struct {
 }
 
 func (input NewConnection) Validate() (NewConnection, error) {
+	var err error
+	input.Environment, err = environment.Normalize(input.Environment)
+	if err != nil {
+		return input, err
+	}
 	input.Name = strings.TrimSpace(input.Name)
 	input.Host = strings.TrimSpace(input.Host)
 	input.DatabaseName = strings.TrimSpace(input.DatabaseName)

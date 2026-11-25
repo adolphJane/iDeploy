@@ -26,7 +26,7 @@ func (s *Store) Create(ctx context.Context, input NewConnection) (Connection, er
 		return Connection{}, err
 	}
 	now := formatTime(time.Now())
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO database_connections(id,name,driver,host,port,database_name,username,ssl_mode,credential_ref,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, input.Name, input.Driver, input.Host, input.Port, input.DatabaseName, input.Username, input.SSLMode, input.CredentialRef, now, now); err != nil {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO database_connections(id,name,driver,host,port,database_name,username,ssl_mode,credential_ref,created_at,updated_at,environment) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, id, input.Name, input.Driver, input.Host, input.Port, input.DatabaseName, input.Username, input.SSLMode, input.CredentialRef, now, now, input.Environment); err != nil {
 		return Connection{}, fmt.Errorf("创建数据库连接: %w", err)
 	}
 	return s.Get(ctx, id)
@@ -37,7 +37,7 @@ func (s *Store) Update(ctx context.Context, id string, input NewConnection) (Con
 	if err != nil {
 		return Connection{}, err
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE database_connections SET name=?,driver=?,host=?,port=?,database_name=?,username=?,ssl_mode=?,credential_ref=?,last_error='',updated_at=? WHERE id=?`, input.Name, input.Driver, input.Host, input.Port, input.DatabaseName, input.Username, input.SSLMode, input.CredentialRef, formatTime(time.Now()), id)
+	result, err := s.db.ExecContext(ctx, `UPDATE database_connections SET name=?,driver=?,host=?,port=?,database_name=?,username=?,ssl_mode=?,credential_ref=?,last_error='',updated_at=?,environment=? WHERE id=?`, input.Name, input.Driver, input.Host, input.Port, input.DatabaseName, input.Username, input.SSLMode, input.CredentialRef, formatTime(time.Now()), input.Environment, id)
 	if err != nil {
 		return Connection{}, fmt.Errorf("更新数据库连接: %w", err)
 	}
@@ -108,7 +108,7 @@ func (s *Store) RecordConnection(ctx context.Context, id string, connectionErr e
 	return nil
 }
 
-const connectionSelect = `SELECT id,name,driver,host,port,database_name,username,ssl_mode,credential_ref,created_at,updated_at,last_connected_at,last_error FROM database_connections`
+const connectionSelect = `SELECT id,name,driver,host,port,database_name,username,ssl_mode,credential_ref,created_at,updated_at,last_connected_at,last_error,environment FROM database_connections`
 
 type scanner interface{ Scan(...any) error }
 
@@ -117,7 +117,7 @@ func scanConnection(row scanner) (Connection, error) {
 	var driver string
 	var created, updated string
 	var connected sql.NullString
-	err := row.Scan(&value.ID, &value.Name, &driver, &value.Host, &value.Port, &value.DatabaseName, &value.Username, &value.SSLMode, &value.CredentialRef, &created, &updated, &connected, &value.LastError)
+	err := row.Scan(&value.ID, &value.Name, &driver, &value.Host, &value.Port, &value.DatabaseName, &value.Username, &value.SSLMode, &value.CredentialRef, &created, &updated, &connected, &value.LastError, &value.Environment)
 	if err != nil {
 		return Connection{}, err
 	}
@@ -150,3 +150,14 @@ func requireAffected(result sql.Result) error {
 }
 func formatTime(value time.Time) string         { return value.UTC().Format(time.RFC3339Nano) }
 func parseTime(value string) (time.Time, error) { return time.Parse(time.RFC3339Nano, value) }
+
+func (s *Store) CanChangeEnvironment(ctx context.Context, id string) error {
+	var bound bool
+	if err := s.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM deployment_targets WHERE database_connection_id=?)", id).Scan(&bound); err != nil {
+		return err
+	}
+	if bound {
+		return errors.New("请先解除应用部署的数据库绑定，再修改数据库环境")
+	}
+	return nil
+}

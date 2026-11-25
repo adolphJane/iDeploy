@@ -78,6 +78,10 @@ func (s *Server) writeBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	if err := lockWorkspaceMutation(r.Context(), tx); err != nil {
+		http.Error(w, "workspace unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	var previous string
 	err = tx.QueryRowContext(r.Context(), s.query(`SELECT digest FROM shared_mutations WHERE id=$1`), input.RequestID).Scan(&previous)
 	if err == nil {
@@ -93,7 +97,9 @@ func (s *Server) writeBatch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "database unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	validateEnvironments := false
 	for _, item := range input.Resources {
+		validateEnvironments = validateEnvironments || hasDeploymentEnvironmentConstraints(item.Kind)
 		var revision int64
 		err = tx.QueryRowContext(r.Context(), s.query(`SELECT revision FROM shared_resources WHERE kind=$1 AND id=$2 FOR UPDATE`), item.Kind, item.ID).Scan(&revision)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -133,6 +139,12 @@ func (s *Server) writeBatch(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil || s.appendChangeTx(r.Context(), tx, item.Kind, item.ID, revision+1, item.Deleted, data) != nil {
 			http.Error(w, "resource write failed", http.StatusServiceUnavailable)
+			return
+		}
+	}
+	if validateEnvironments {
+		if err := validateDeploymentEnvironments(r.Context(), tx); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
 	}

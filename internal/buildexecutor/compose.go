@@ -75,6 +75,9 @@ func BuildCompose(ctx context.Context, input ComposeBuildInput) (string, error) 
 	if _, err := ComposeBuildImages(string(raw), doc.Platform, input.Registry.Host); err != nil {
 		return "", err
 	}
+	if err := ValidateComposeArtifactTags(string(raw), input.Version); err != nil {
+		return "", err
+	}
 	if err := validateComposeBuildPaths(raw, input.Checkout.Root); err != nil {
 		return "", err
 	}
@@ -312,4 +315,35 @@ func PinComposeManifest(config string) (string, error) {
 		return "", err
 	}
 	return strings.ReplaceAll(string(data), "$", "$$"), nil
+}
+
+// ValidateComposeArtifactTags protects named deployment environments when a
+// Compose project builds several images into a shared registry.
+func ValidateComposeArtifactTags(config, tag string) error {
+	if !strings.HasPrefix(tag, "ideploy-env-") {
+		return nil
+	}
+	var document struct {
+		Services map[string]struct {
+			Image string `json:"image"`
+			Build *struct {
+				Tags []string `json:"tags"`
+			} `json:"build"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal([]byte(config), &document); err != nil {
+		return err
+	}
+	for name, service := range document.Services {
+		if service.Build == nil {
+			continue
+		}
+		for _, image := range append([]string{service.Image}, service.Build.Tags...) {
+			colon := strings.LastIndex(image, ":")
+			if colon <= strings.LastIndex(image, "/") || image[colon+1:] != tag {
+				return fmt.Errorf("Compose 构建服务 %s 的全部镜像标签须使用 ${IMAGE_TAG}", name)
+			}
+		}
+	}
+	return nil
 }

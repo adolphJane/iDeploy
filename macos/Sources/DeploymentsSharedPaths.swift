@@ -53,7 +53,7 @@ struct SharedPathEditor: View {
                     TextField("完整域名，例如 apps.example.com", text: $fqdn).textFieldStyle(.roundedBorder).disabled(locked)
                     TextField("路径名，例如 demo", text: $path).textFieldStyle(.roundedBorder).disabled(locked)
                     if let deployment = model.deployments.first(where: { $0.id == fixedDeploymentID }) {
-                        Text("部署目标：\(deployment["projectName"].string) · \(deployment["name"].string)")
+                        Text("部署目标：\(deployment.deploymentDisplayName) · \(deployment.deploymentLocation)")
                             .font(.system(size: 12)).foregroundStyle(DeployStyle.muted)
                     }
                     HStack {

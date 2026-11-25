@@ -179,6 +179,10 @@ func (s *Server) writeResource(w http.ResponseWriter, r *http.Request, kind, id 
 		return
 	}
 	defer tx.Rollback()
+	if err := lockWorkspaceMutation(r.Context(), tx); err != nil {
+		http.Error(w, "workspace unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	var revision int64
 	err = tx.QueryRowContext(r.Context(), s.query(`SELECT revision FROM shared_resources WHERE kind=$1 AND id=$2 FOR UPDATE`), kind, id).Scan(&revision)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -215,6 +219,12 @@ func (s *Server) writeResource(w http.ResponseWriter, r *http.Request, kind, id 
 	if err != nil {
 		http.Error(w, "write failed", http.StatusConflict)
 		return
+	}
+	if hasDeploymentEnvironmentConstraints(kind) {
+		if err := validateDeploymentEnvironments(r.Context(), tx); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 	}
 	if _, err = tx.ExecContext(r.Context(), `UPDATE shared_workspace SET revision=revision+1,updated_at=now() WHERE id=1`); err != nil {
 		http.Error(w, "database unavailable", http.StatusServiceUnavailable)

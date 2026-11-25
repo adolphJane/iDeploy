@@ -4,6 +4,8 @@ import AppKit
 private struct DeploymentFormRequest: Identifiable {
     let id = UUID()
     let deployment: J?
+    var source: J? = nil
+    var environment: String? = nil
 }
 
 struct DeploymentsPage: View {
@@ -23,18 +25,49 @@ struct DeploymentsPage: View {
     @State private var loadedDetailID: String?
     @State private var detailLoadID = UUID()
     @State private var formRequest: DeploymentFormRequest?
-    @State private var showingPublish = false
+    @State private var publishTarget: J?
     @State private var showingEnvironment = false
     @State private var deleteTarget: J?
     @State private var rollbackTarget: J?
 
     private var selected: J? { model.deployments.first { $0.id == selectedID } }
 
+    private var deploymentRows: [J] {
+        var projects = Set<String>()
+        return model.deployments.compactMap { deployment in
+            guard deployment.deploymentEnvironment != "default" else { return deployment }
+            guard projects.insert(deployment["projectId"].string).inserted else { return nil }
+            return environments(for: deployment).first
+        }
+    }
+
+    private func environments(for deployment: J) -> [J] {
+        model.deployments.filter {
+            $0["projectId"].string == deployment["projectId"].string && $0.deploymentEnvironment != "default"
+        }.sorted { $0.deploymentEnvironment == "test" && $1.deploymentEnvironment == "production" }
+    }
+
+    private func selectDeployment(_ id: String?) {
+        guard selectedID != id else { return }
+        releaseMonitor?.cancel()
+        releaseMonitor = nil
+        releaseJobs = [:]
+        runtime = J(nil)
+        releases = []
+        environment = J(nil)
+        domainBindings = []
+        pathRoutes = []
+        loadedDetailID = nil
+        detailLoadID = UUID()
+        loadingDetail = id != nil
+        selectedID = id
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
                 HStack {
-                    WorkspaceListHeader(title: "部署", count: model.deployments.count)
+                    WorkspaceListHeader(title: "部署", count: deploymentRows.count)
                     Spacer()
                     Button { formRequest = DeploymentFormRequest(deployment: nil) } label: { Image(systemName: "plus") }
                         .buttonStyle(DeploySecondaryButtonStyle())
@@ -45,10 +78,12 @@ struct DeploymentsPage: View {
                 Rectangle().fill(DeployStyle.line).frame(height: 1)
                 ScrollView(.vertical, showsIndicators: false) {
                     LazyVStack(spacing: 5) {
-                        ForEach(model.deployments, id: \.id) { deployment in
-                            let isSelected = selectedID == deployment.id
+                        ForEach(deploymentRows, id: \.id) { deployment in
+                            let named = deployment.deploymentEnvironment != "default"
+                            let targets = named ? environments(for: deployment) : [deployment]
+                            let isSelected = targets.contains { $0.id == selectedID }
                             Button {
-                                selectedID = deployment.id
+                                if !isSelected { selectDeployment(deployment.id) }
                             } label: {
                                 HStack(spacing: 11) {
                                     Image(systemName: "shippingbox")
@@ -61,7 +96,7 @@ struct DeploymentsPage: View {
                                             .font(.system(size: 12, weight: .semibold))
                                             .foregroundStyle(DeployStyle.ink)
                                             .lineLimit(1)
-                                        Text("\(deployment["serverName"].string) · \(deployment["workloadName"].string)")
+                                        Text(named ? targets.map(\.deploymentEnvironmentLabel).joined(separator: " · ") : deployment.deploymentLocation)
                                             .font(.system(size: 10))
                                             .foregroundStyle(DeployStyle.muted)
                                             .lineLimit(1)
@@ -92,7 +127,7 @@ struct DeploymentsPage: View {
                 PageContainer {
                     HStack {
                         SectionHeading(deployment["projectName"].string,
-                                       "\(deployment["serverName"].string) · \(deployment["workloadName"].string)")
+                                       deployment.deploymentLocation)
                         Spacer()
                         if loadingDetail && loadedDetailID != deployment.id {
                             ProgressView()
@@ -102,8 +137,30 @@ struct DeploymentsPage: View {
                             StateBadge(state: runtime["status"].string)
                         }
                     }
+                    if deployment.deploymentEnvironment != "default" {
+                        let targets = environments(for: deployment)
+                        HStack {
+                            Picker("部署环境", selection: Binding(
+                                get: { deployment.id },
+                                set: { selectDeployment($0) }
+                            )) {
+                                ForEach(targets, id: \.id) { target in
+                                    Text(target.deploymentEnvironmentLabel).tag(target.id)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .accessibilityLabel("部署环境")
+                            if targets.count == 1 {
+                                let next = deployment.deploymentEnvironment == "test" ? "production" : "test"
+                                Button("添加" + DeploymentEnvironmentLabel.name(next)) {
+                                    formRequest = DeploymentFormRequest(deployment: nil, source: deployment, environment: next)
+                                }
+                                .buttonStyle(DeploySecondaryButtonStyle())
+                            }
+                        }
+                    }
                     HStack {
-                        Button("发布新版本") { showingPublish = true }
+                        Button(deployment.deploymentPublishTitle) { publishTarget = deployment }
                             .buttonStyle(.borderedProminent)
                         Button("刷新状态") { loadDetail(deployment.id) }
                         Menu("运行操作") {
@@ -118,7 +175,9 @@ struct DeploymentsPage: View {
                     HStack(spacing: 12) {
                         InfoTile(title: "工作负载", value: deployment["workloadKind"].string == "compose" ? "Compose" : "容器", symbol: "shippingbox")
                         InfoTile(title: "目标服务器", value: deployment["serverName"].string, symbol: "server.rack")
-                        InfoTile(title: "发布记录", value: loadingDetail && loadedDetailID != deployment.id ? "…" : "\(releases.count)", symbol: "clock.arrow.circlepath")
+                        InfoTile(title: "最近成功版本",
+                                 value: loadingDetail && loadedDetailID != deployment.id ? "…" : releases.first { $0["status"].string == "succeeded" }?["version"].string ?? "—",
+                                 symbol: "clock.arrow.circlepath")
                     }
                     if loadingDetail {
                         AppLoadingView(title: "正在加载部署状态、环境变量和发布记录…")
@@ -197,6 +256,25 @@ struct DeploymentsPage: View {
                     .padding(18)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .deployCard(fill: DeployStyle.overviewPanel)
+                    let databaseID = deployment["databaseConnectionId"].string
+                    if deployment.deploymentEnvironment != "default" || !databaseID.isEmpty {
+                        let database = model.databases.first { $0.id == databaseID }
+                        HStack {
+                            SectionHeading("数据库", database.map {
+                                [$0["name"].string, $0["host"].string + ":" + $0["port"].string, $0["databaseName"].string]
+                                    .filter { !$0.isEmpty }.joined(separator: " · ")
+                            } ?? "尚未绑定数据库")
+                            Spacer()
+                            if let database {
+                                let state = !database["lastError"].string.isEmpty ? "连接异常" :
+                                    database["lastConnectedAt"].string.isEmpty ? "待测试" : "连接已验证"
+                                Text(state).foregroundStyle(DeployStyle.muted)
+                            }
+                        }
+                        .padding(18)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .deployCard(fill: DeployStyle.overviewPanel)
+                    }
                     VStack(alignment: .leading, spacing: 14) {
                         HStack {
                             SectionHeading("环境变量")
@@ -330,30 +408,20 @@ struct DeploymentsPage: View {
             releaseMonitor = nil
         }
         .sheet(item: $formRequest) { request in
-            DeploymentFormView(deployment: request.deployment)
-                .environmentObject(model)
-                .id(request.id)
-        }
-        .onChange(of: selectedID) { _ in
-            releaseMonitor?.cancel()
-            releaseMonitor = nil
-            releaseJobs = [:]
-            runtime = J(nil)
-            releases = []
-            environment = J(nil)
-            domainBindings = []
-            pathRoutes = []
-            loadedDetailID = nil
-            loadingDetail = selectedID != nil
-        }
-        .sheet(isPresented: $showingPublish) {
-            if let selected {
-                PublishView(deployment: selected) { job in
-                    releaseJobs[job.id] = job
-                    loadReleaseList(selected.id)
-                }
-                .environmentObject(model)
+            DeploymentFormView(deployment: request.deployment, source: request.source,
+                               requestedEnvironment: request.environment) { id in
+                selectDeployment(id)
             }
+            .environmentObject(model)
+            .id(request.id)
+        }
+        .sheet(item: $publishTarget) { target in
+            PublishView(deployment: target) { job in
+                guard selectedID == target.id else { return }
+                releaseJobs[job.id] = job
+                loadReleaseList(target.id)
+            }
+            .environmentObject(model)
         }
         .sheet(item: $jobDetail) { job in
             JobDetailSheet(job: job).environmentObject(model)
@@ -382,7 +450,8 @@ struct DeploymentsPage: View {
                 guard let target = deleteTarget else { return }
                 Task {
                     await model.perform("DeleteDeployment", [target.id])
-                    selectedID = nil
+                    let other = environments(for: target).first { $0.id != target.id }
+                    selectDeployment(other?.id)
                     deleteTarget = nil
                 }
             }
@@ -392,7 +461,7 @@ struct DeploymentsPage: View {
             set: { if !$0 { rollbackTarget = nil } }
         )) {
             Button("开始回滚", role: .destructive) {
-                guard let target = rollbackTarget, let deployment = selected else { return }
+                guard let target = rollbackTarget, let deployment = selected, target["deploymentId"].string == deployment.id else { return }
                 Task {
                     await model.perform("RollbackDeployment", [deployment.id, target.id])
                     rollbackTarget = nil
@@ -400,7 +469,7 @@ struct DeploymentsPage: View {
                 }
             }
         } message: {
-            Text("将以所选发布记录的镜像和配置重建远程工作负载。")
+            Text("\(selected?.deploymentEnvironmentLabel ?? "部署") · \(selected?["serverName"].string ?? "") · \(rollbackTarget?["version"].string ?? "")。将以所选发布制品重建远程工作负载。")
         }
     }
 
@@ -483,6 +552,11 @@ struct DeploymentFormView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
     let deployment: J?
+    let source: J?
+    let requestedEnvironment: String?
+    let onCreated: (String) -> Void
+    @State private var deploymentEnvironment: String
+    @State private var databaseID: String
     @State private var projectID: String
     @State private var serverID: String
     @State private var workloadKind: String
@@ -491,15 +565,28 @@ struct DeploymentFormView: View {
     @State private var restartPolicy: String
     @State private var buildMode: String
 
-    init(deployment: J?) {
+    init(deployment: J?, source: J? = nil, requestedEnvironment: String? = nil,
+         onCreated: @escaping (String) -> Void = { _ in }) {
         self.deployment = deployment
-        _projectID = State(initialValue: deployment?["projectId"].string ?? "")
+        self.source = source
+        self.requestedEnvironment = requestedEnvironment
+        self.onCreated = onCreated
+        _deploymentEnvironment = State(initialValue: deployment?.deploymentEnvironment ?? requestedEnvironment ?? "default")
+        _databaseID = State(initialValue: deployment?["databaseConnectionId"].string ?? "")
+        _projectID = State(initialValue: (deployment ?? source)?["projectId"].string ?? "")
         _serverID = State(initialValue: deployment?["serverId"].string ?? "")
-        _workloadKind = State(initialValue: deployment?["workloadKind"].string ?? "container")
+        _workloadKind = State(initialValue: (deployment ?? source)?["workloadKind"].string ?? "container")
         _workloadName = State(initialValue: deployment?["workloadName"].string ?? "")
         _ports = State(initialValue: deployment?["containerPorts"].array.map(\.string).joined(separator: ", ") ?? "")
-        _restartPolicy = State(initialValue: deployment?["restartPolicy"].string ?? "unless-stopped")
-        _buildMode = State(initialValue: deployment?["buildMode"].string ?? "local")
+        _restartPolicy = State(initialValue: (deployment ?? source)?["restartPolicy"].string ?? "unless-stopped")
+        _buildMode = State(initialValue: (deployment ?? source)?["buildMode"].string ?? "local")
+    }
+
+    private var availableServers: [J] {
+        let occupied = Set(model.deployments.filter {
+            $0["projectId"].string == projectID && $0.id != deployment?.id
+        }.map { $0["serverId"].string })
+        return model.servers.filter { !occupied.contains($0.id) }
     }
 
     var body: some View {
@@ -511,7 +598,7 @@ struct DeploymentFormView: View {
                     .frame(width: 48, height: 48)
                     .background(DeployStyle.greenSoft, in: RoundedRectangle(cornerRadius: 13))
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(deployment == nil ? "添加部署" : "编辑部署配置")
+                    Text(deployment != nil ? "编辑部署配置" : requestedEnvironment.map { "添加" + DeploymentEnvironmentLabel.name($0) } ?? "添加部署")
                         .font(.system(size: 21, weight: .bold))
                         .foregroundStyle(DeployStyle.ink)
                     Text("选择项目和服务器，配置要运行的工作负载。")
@@ -538,18 +625,32 @@ struct DeploymentFormView: View {
                                     }
                                 }
                                 .labelsHidden()
+                                .disabled(deployment != nil || source != nil)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             }
                             VStack(alignment: .leading, spacing: 7) {
                                 Text("服务器").font(.system(size: 12, weight: .semibold)).foregroundStyle(DeployStyle.ink)
                                 Picker("服务器", selection: $serverID) {
                                     Text("选择服务器").tag("")
-                                    ForEach(model.servers, id: \.id) { server in
+                                    ForEach(availableServers, id: \.id) { server in
                                         Text(server["name"].string).tag(server.id)
                                     }
                                 }
                                 .labelsHidden()
+                                .disabled(deployment != nil)
                                 .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                        Picker("部署环境", selection: $deploymentEnvironment) {
+                            ForEach(DeploymentEnvironmentLabel.values, id: \.self) { value in
+                                Text(DeploymentEnvironmentLabel.name(value)).tag(value)
+                            }
+                        }
+                        .disabled(requestedEnvironment != nil)
+                        Picker("关联数据库", selection: $databaseID) {
+                            Text("未绑定").tag("")
+                            ForEach(model.databases.filter { $0.deploymentEnvironment == deploymentEnvironment }, id: \.id) { database in
+                                Text(database["name"].string + " · " + database["host"].string).tag(database.id)
                             }
                         }
                         Picker("构建位置", selection: $buildMode) {
@@ -634,23 +735,31 @@ struct DeploymentFormView: View {
                             "projectId": projectID, "serverId": serverID, "workloadKind": workloadKind,
                             "workloadName": workloadName,
                             "containerPorts": ports.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) },
-                            "restartPolicy": restartPolicy, "buildMode": buildMode
+                            "restartPolicy": restartPolicy, "buildMode": buildMode,
+                            "environment": deploymentEnvironment, "databaseConnectionId": databaseID
                         ]
                         let result = await model.perform(deployment == nil ? "CreateDeployment" : "ConfigureDeployment",
                                                          deployment == nil ? [input] : [deployment!.id, input])
-                        if result != nil { dismiss() }
+                        if let result {
+                            if deployment == nil { onCreated(result.id) }
+                            dismiss()
+                        }
                     }
                 }
                 .buttonStyle(DeployPrimaryButtonStyle())
                 .keyboardShortcut(.defaultAction)
-                .disabled(projectID.isEmpty || serverID.isEmpty || workloadName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                .disabled(projectID.isEmpty || !availableServers.contains(where: { $0.id == serverID }) || workloadName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
                           (buildMode == "remote" && model.projects.first(where: { $0.id == projectID })?["sourceKind"].string != "git"))
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 16)
             .background(DeployStyle.overviewPanel)
         }
-        .frame(width: 650, height: workloadKind == "compose" ? 520 : 600)
+        .frame(width: 650, height: workloadKind == "compose" ? 570 : 630)
+        .onChange(of: projectID) { _ in
+            if !availableServers.contains(where: { $0.id == serverID }) { serverID = "" }
+        }
+        .onChange(of: deploymentEnvironment) { _ in databaseID = "" }
         .environment(\.colorScheme, .light)
     }
 }
@@ -678,9 +787,10 @@ struct PublishView: View {
     @State private var checkError = ""
     @State private var publishError = ""
     @State private var copied = false
+    @State private var confirmingProduction = false
 
     private var trimmedVersion: String { version.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var canPublish: Bool { !publishing && !checking && !ingressFQDN.isEmpty && !publishPath.isEmpty && (Int(containerPort) ?? 0) > 0 && (Int(containerPort) ?? 0) <= 65535 }
+    private var canPublish: Bool { !publishing && !checking && !registryID.isEmpty && !trimmedVersion.isEmpty && preflight["ok"].bool && !ingressFQDN.isEmpty && !publishPath.isEmpty && (Int(containerPort) ?? 0) > 0 && (Int(containerPort) ?? 0) <= 65535 }
     private var visibleChecks: [J] { checking ? preflightProgress["checks"].array : preflight["checks"].array }
     private var checkSummary: String {
         let heading = checking ? "发布前检查：进行中" :
@@ -694,7 +804,7 @@ struct PublishView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SectionHeading("发布新版本", deployment["projectName"].string)
+            SectionHeading(deployment.deploymentPublishTitle, deployment.deploymentDisplayName + " · " + deployment.deploymentLocation)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(24)
                 .background(DeployStyle.overviewHeader)
@@ -856,7 +966,13 @@ struct PublishView: View {
                 Button("取消") { dismiss() }
                     .buttonStyle(DeploySecondaryButtonStyle(height: 34))
                     .disabled(publishing)
-                Button(publishing ? "正在提交…" : "开始发布") { publish() }
+                Button(publishing ? "正在提交…" : deployment.deploymentPublishTitle) {
+                    if deployment.deploymentEnvironment == "production" {
+                        confirmingProduction = true
+                    } else {
+                        publish()
+                    }
+                }
                     .buttonStyle(DeployPrimaryButtonStyle())
                     .disabled(!canPublish)
             }
@@ -864,6 +980,12 @@ struct PublishView: View {
             .padding(.horizontal, 24)
             .padding(.vertical, 16)
             .background(DeployStyle.overviewPanel)
+        }
+        .alert("确认发布到线上环境？", isPresented: $confirmingProduction) {
+            Button("取消", role: .cancel) {}
+            Button("发布到线上环境") { publish() }
+        } message: {
+            Text("\(deployment.deploymentDisplayName) · \(deployment.deploymentLocation) · \(trimmedVersion)\nhttps://\(ingressFQDN)/\(publishPath.trimmingCharacters(in: CharacterSet(charactersIn: "/")))")
         }
         .frame(width: 680, height: 680)
         .environment(\.colorScheme, .light)
@@ -995,6 +1117,7 @@ struct PublishView: View {
                 publishStage = "本机工具已就绪，正在创建发布任务…"
                 let input: [String: Any] = [
                     "deploymentId": deployment.id, "registryId": registryID, "version": trimmedVersion,
+                    "expectedEnvironment": deployment.deploymentEnvironment,
                     "fqdn": ingressFQDN, "pathPrefix": publishPath, "serviceName": serviceName, "containerPort": port
                 ]
                 let job = try await NativeBridge.call("PublishDeployment", [input], timeoutSeconds: 140)

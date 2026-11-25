@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"ideploy/internal/platform/environment"
 )
 
 type DesiredState string
@@ -27,6 +29,8 @@ const (
 )
 
 type Target struct {
+	Environment                string
+	DatabaseConnectionID       string
 	BuildMode                  BuildMode
 	WorkloadKind               string
 	WorkloadName               string
@@ -43,13 +47,15 @@ type Target struct {
 }
 
 type Input struct {
-	BuildMode      BuildMode
-	WorkloadKind   string
-	WorkloadName   string
-	ProjectID      string
-	ServerID       string
-	ContainerPorts []string
-	RestartPolicy  string
+	Environment          string
+	DatabaseConnectionID *string
+	BuildMode            BuildMode
+	WorkloadKind         string
+	WorkloadName         string
+	ProjectID            string
+	ServerID             string
+	ContainerPorts       []string
+	RestartPolicy        string
 }
 
 type ReleaseStatus string
@@ -68,6 +74,7 @@ const (
 )
 
 type Release struct {
+	ImageTag            string
 	BuildMode           BuildMode
 	SourceCommit        string
 	DeliveryRef         string
@@ -146,6 +153,11 @@ type ReleaseInput struct {
 }
 
 func (input Input) Validate() (Input, error) {
+	var err error
+	input.Environment, err = environment.Normalize(input.Environment)
+	if err != nil {
+		return input, err
+	}
 	if input.BuildMode == "" {
 		input.BuildMode = BuildLocal
 	}

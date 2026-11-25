@@ -153,6 +153,33 @@ func parseCLIArguments(arguments []string) (cliRequest, cliOptions, string, erro
 				return cliRequest{}, options, "", fmt.Errorf("deployment %s requires a deployment ID", action)
 			}
 			request.ID = remaining[0]
+		case "configure":
+			id, flags, err := takeCLIResourceID(remaining, "deployment configure")
+			if err != nil {
+				return cliRequest{}, options, "", err
+			}
+			set := newCLIFlagSet("deployment configure")
+			environment := set.String("environment", "", "")
+			database := set.String("database", "", "")
+			if err := set.Parse(flags); err != nil {
+				return cliRequest{}, options, "", err
+			}
+			if set.NArg() != 0 {
+				return cliRequest{}, options, "", errors.New("deployment configure received unexpected arguments")
+			}
+			patch := &DeploymentPatchInput{}
+			set.Visit(func(flag *flag.Flag) {
+				switch flag.Name {
+				case "environment":
+					patch.Environment = environment
+				case "database":
+					patch.DatabaseConnectionID = database
+				}
+			})
+			if patch.Environment == nil && patch.DatabaseConnectionID == nil {
+				return cliRequest{}, options, "", errors.New("deployment configure requires --environment or --database")
+			}
+			request.Command, request.ID, request.DeploymentPatch = "deployment.update", id, patch
 		case "env":
 			if len(remaining) < 2 {
 				return cliRequest{}, options, "", errors.New("deployment env requires list, set, remove, or set-secret followed by a deployment ID")
@@ -392,6 +419,7 @@ Commands:
   ingress list
   deployment list
   deployment get <deployment-id>
+  deployment configure <deployment-id> [--environment test|production|default] [--database <connection-id>]
   deployment env list <deployment-id>
   deployment env set <deployment-id> KEY=VALUE [KEY=VALUE ...]
   deployment env remove <deployment-id> KEY [KEY ...]

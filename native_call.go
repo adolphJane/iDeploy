@@ -36,6 +36,9 @@ func init() {
 	nativeMethods["UpdateServerAgent"] = true
 	nativeMethods["UninstallServerAgent"] = true
 	nativeMethods["CreateRemoteDatabase"] = true
+	for _, name := range splitNativeNames("ListManagedDatabases CreateManagedDatabase DeleteManagedDatabaseConfiguration ListManagedDatabaseBackups RunManagedDatabaseOperation") {
+		nativeMethods[name] = true
+	}
 	for _, name := range splitNativeNames("GetSharedWorkspaceStatus GetSharedSyncHealth PreviewSharedWorkspaceMigration StartSharedWorkspaceMigration SyncSharedWorkspace PushSharedWorkspace RetryPendingSharedChanges ReconcileSharedWorkspace NewSharedPairingCode JoinSharedWorkspace ListSharedConflicts ResolveSharedConflict ListSharedDevices RevokeSharedDevice") {
 		nativeMethods[name] = true
 	}
@@ -75,7 +78,7 @@ var sharedOperationMutations = map[string]bool{
 	"OperateDeployment": true, "OperateRemoteContainer": true,
 	"InstallServerAgent": true, "UpdateServerAgent": true, "UninstallServerAgent": true,
 	"IssueServerCertificate": true, "RenewServerCertificates": true,
-	"CreateRemoteDatabase": true,
+	"CreateRemoteDatabase": true, "RunManagedDatabaseOperation": true,
 }
 
 func executeNativeCall(service *SystemService, name string, args []json.RawMessage) (value any, err error) {

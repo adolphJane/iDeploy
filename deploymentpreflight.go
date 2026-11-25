@@ -333,6 +333,13 @@ func (s *SystemService) PreflightDeployment(input DeploymentPreflightInput) (Dep
 
 	setStage(5, "正在连接目标服务器并检查 Docker")
 	remote := server.NewRemote()
+	if target.DatabaseConnectionID != "" {
+		if databaseErr := s.checkDeploymentDatabase(ctx, target, host); databaseErr != nil {
+			add("database_connection", "failed", databaseErr.Error())
+		} else {
+			add("database_connection", "ok", "目标服务器可以连接所选环境的数据库端口")
+		}
+	}
 	probe := remote.Probe(ctx, host)
 	if probe.Status != server.StatusHealthy {
 		add("server_connection", "failed", probe.Detail)

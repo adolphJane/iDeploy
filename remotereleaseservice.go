@@ -74,7 +74,7 @@ func (s *SystemService) buildRemoteRelease(ctx context.Context, store *deploymen
 	}()
 	remote, err := client.CreateRemoteRelease(ctx, sharedworkspace.RemoteReleaseJob{RequestID: requestID, DeploymentID: release.DeploymentID, ReleaseID: release.ID,
 		DeliveryCommit: delivered.DeliveryCommit, DeliveryDigest: delivered.Digest, RepositoryURL: projectValue.RepositoryURL,
-		Version: release.Version, RegistryID: registryValue.ID, RegistryHost: registry.DockerHost(registryValue.Endpoint), RegistryUser: registryValue.Username})
+		Version: release.ArtifactTag(), RegistryID: registryValue.ID, RegistryHost: registry.DockerHost(registryValue.Endpoint), RegistryUser: registryValue.Username})
 	if err != nil {
 		return "", "", fmt.Errorf("提交远端构建任务: %w", err)
 	}
@@ -92,7 +92,7 @@ func (s *SystemService) buildRemoteRelease(ctx context.Context, store *deploymen
 		return "", "", err
 	}
 	if workloadKind == "compose" {
-		if result.ImageRef != "compose:"+release.DeploymentID+":"+release.Version || result.Manifest == "" || len(result.Manifest) > 900*1024 {
+		if result.ImageRef != "compose:"+release.DeploymentID+":"+release.ArtifactTag() || result.Manifest == "" || len(result.Manifest) > 900*1024 {
 			return "", "", errors.New("远端 Compose 构建未返回完整制品")
 		}
 		if _, err := buildexecutor.PinComposeManifest(result.Manifest); err != nil {

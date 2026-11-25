@@ -916,7 +916,7 @@ struct DomainBindingDraftView: View {
                 Picker("部署", selection: $deploymentID) {
                     Text("选择部署").tag("")
                     ForEach(model.deployments, id: \.id) { deployment in
-                        Text("\(deployment["projectName"].string) · \(deployment["serverName"].string)").tag(deployment.id)
+                        Text(deployment.deploymentDisplayName + " · " + deployment["serverName"].string).tag(deployment.id)
                     }
                 }
                 if !deploymentID.isEmpty {

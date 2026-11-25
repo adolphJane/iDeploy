@@ -100,35 +100,41 @@ type mcpUpdateProjectInput struct {
 }
 
 type mcpCreateDeploymentInput struct {
-	RequestID      string   `json:"request_id,omitempty" jsonschema:"optional caller-generated idempotency key; reuse it when retrying an uncertain request"`
-	ProjectID      string   `json:"project_id" jsonschema:"stable project identifier returned by create_project or list_projects"`
-	ServerID       string   `json:"server_id" jsonschema:"stable server identifier returned by list_servers"`
-	WorkloadKind   string   `json:"workload_kind" jsonschema:"remote workload type: container or compose"`
-	WorkloadName   string   `json:"workload_name" jsonschema:"remote container name, or lowercase Compose project name"`
-	ContainerPorts []string `json:"container_ports,omitempty" jsonschema:"container-only port mappings, for example 8080, 8080:80, 127.0.0.1:8080:80, optionally ending in /tcp or /udp; ignored for compose"`
-	RestartPolicy  string   `json:"restart_policy,omitempty" jsonschema:"container restart policy: no, always, unless-stopped, or on-failure; defaults to unless-stopped"`
+	Environment          string   `json:"environment,omitempty" jsonschema:"deployment environment: default, test, or production"`
+	DatabaseConnectionID *string  `json:"database_connection_id,omitempty" jsonschema:"optional database connection in the same environment"`
+	RequestID            string   `json:"request_id,omitempty" jsonschema:"optional caller-generated idempotency key; reuse it when retrying an uncertain request"`
+	ProjectID            string   `json:"project_id" jsonschema:"stable project identifier returned by create_project or list_projects"`
+	ServerID             string   `json:"server_id" jsonschema:"stable server identifier returned by list_servers"`
+	WorkloadKind         string   `json:"workload_kind" jsonschema:"remote workload type: container or compose"`
+	WorkloadName         string   `json:"workload_name" jsonschema:"remote container name, or lowercase Compose project name"`
+	ContainerPorts       []string `json:"container_ports,omitempty" jsonschema:"container-only port mappings, for example 8080, 8080:80, 127.0.0.1:8080:80, optionally ending in /tcp or /udp; ignored for compose"`
+	RestartPolicy        string   `json:"restart_policy,omitempty" jsonschema:"container restart policy: no, always, unless-stopped, or on-failure; defaults to unless-stopped"`
 }
 
 type mcpUpdateDeploymentInput struct {
-	RequestID      string    `json:"request_id,omitempty" jsonschema:"optional caller-generated idempotency key; reuse it when retrying an uncertain request"`
-	DeploymentID   string    `json:"deployment_id" jsonschema:"stable deployment identifier returned by create_deployment or list_deployments"`
-	ProjectID      *string   `json:"project_id,omitempty" jsonschema:"new project identifier"`
-	ServerID       *string   `json:"server_id,omitempty" jsonschema:"new target server identifier"`
-	WorkloadKind   *string   `json:"workload_kind,omitempty" jsonschema:"new workload type: container or compose"`
-	WorkloadName   *string   `json:"workload_name,omitempty" jsonschema:"new container or Compose project name"`
-	ContainerPorts *[]string `json:"container_ports,omitempty" jsonschema:"replacement container port mappings; an empty array clears them"`
-	RestartPolicy  *string   `json:"restart_policy,omitempty" jsonschema:"new container restart policy"`
+	Environment          *string   `json:"environment,omitempty" jsonschema:"deployment environment: default, test, or production"`
+	DatabaseConnectionID *string   `json:"database_connection_id,omitempty" jsonschema:"same-environment database connection ID, or empty to unbind"`
+	RequestID            string    `json:"request_id,omitempty" jsonschema:"optional caller-generated idempotency key; reuse it when retrying an uncertain request"`
+	DeploymentID         string    `json:"deployment_id" jsonschema:"stable deployment identifier returned by create_deployment or list_deployments"`
+	ProjectID            *string   `json:"project_id,omitempty" jsonschema:"new project identifier"`
+	ServerID             *string   `json:"server_id,omitempty" jsonschema:"new target server identifier"`
+	WorkloadKind         *string   `json:"workload_kind,omitempty" jsonschema:"new workload type: container or compose"`
+	WorkloadName         *string   `json:"workload_name,omitempty" jsonschema:"new container or Compose project name"`
+	ContainerPorts       *[]string `json:"container_ports,omitempty" jsonschema:"replacement container port mappings; an empty array clears them"`
+	RestartPolicy        *string   `json:"restart_policy,omitempty" jsonschema:"new container restart policy"`
 }
 
 type mcpCloneDeploymentInput struct {
-	RequestID      string    `json:"request_id,omitempty" jsonschema:"optional caller-generated idempotency key; reuse it when retrying an uncertain request"`
-	DeploymentID   string    `json:"deployment_id" jsonschema:"source deployment configuration identifier"`
-	ServerID       string    `json:"server_id" jsonschema:"target server identifier; normally different from the source server"`
-	WorkloadName   string    `json:"workload_name" jsonschema:"new remote container or Compose project name"`
-	ProjectID      *string   `json:"project_id,omitempty" jsonschema:"optional replacement project identifier; defaults to the source project"`
-	WorkloadKind   *string   `json:"workload_kind,omitempty" jsonschema:"optional replacement workload type: container or compose"`
-	ContainerPorts *[]string `json:"container_ports,omitempty" jsonschema:"optional replacement port mappings; omitted inherits the source"`
-	RestartPolicy  *string   `json:"restart_policy,omitempty" jsonschema:"optional replacement restart policy"`
+	Environment          *string   `json:"environment,omitempty" jsonschema:"environment of the new target; omitted defaults to default"`
+	DatabaseConnectionID *string   `json:"database_connection_id,omitempty" jsonschema:"optional database connection in the same environment"`
+	RequestID            string    `json:"request_id,omitempty" jsonschema:"optional caller-generated idempotency key; reuse it when retrying an uncertain request"`
+	DeploymentID         string    `json:"deployment_id" jsonschema:"source deployment configuration identifier"`
+	ServerID             string    `json:"server_id" jsonschema:"target server identifier; normally different from the source server"`
+	WorkloadName         string    `json:"workload_name" jsonschema:"new remote container or Compose project name"`
+	ProjectID            *string   `json:"project_id,omitempty" jsonschema:"optional replacement project identifier; defaults to the source project"`
+	WorkloadKind         *string   `json:"workload_kind,omitempty" jsonschema:"optional replacement workload type: container or compose"`
+	ContainerPorts       *[]string `json:"container_ports,omitempty" jsonschema:"optional replacement port mappings; omitted inherits the source"`
+	RestartPolicy        *string   `json:"restart_policy,omitempty" jsonschema:"optional replacement restart policy"`
 }
 
 type mcpDeleteProjectInput struct {
@@ -615,6 +621,7 @@ func registerMCPMutationTools(server *mcp.Server, service *mcpService) {
 			restartPolicy = "unless-stopped"
 		}
 		return cliRequest{Command: "deployment.create", RequestID: strings.TrimSpace(input.RequestID), Deployment: &DeploymentInput{
+			Environment: input.Environment, DatabaseConnectionID: input.DatabaseConnectionID,
 			ProjectID: strings.TrimSpace(input.ProjectID), ServerID: strings.TrimSpace(input.ServerID),
 			WorkloadKind: workloadKind, WorkloadName: strings.TrimSpace(input.WorkloadName),
 			ContainerPorts: input.ContainerPorts, RestartPolicy: restartPolicy,
@@ -629,6 +636,7 @@ func registerMCPMutationTools(server *mcp.Server, service *mcpService) {
 			return cliRequest{}, err
 		}
 		return cliRequest{Command: "deployment.update", ID: strings.TrimSpace(input.DeploymentID), RequestID: strings.TrimSpace(input.RequestID), DeploymentPatch: &DeploymentPatchInput{
+			Environment: input.Environment, DatabaseConnectionID: input.DatabaseConnectionID,
 			ProjectID: input.ProjectID, ServerID: input.ServerID, WorkloadKind: input.WorkloadKind,
 			WorkloadName: input.WorkloadName, ContainerPorts: input.ContainerPorts, RestartPolicy: input.RestartPolicy,
 		}}, nil
@@ -683,6 +691,7 @@ func registerMCPMutationTools(server *mcp.Server, service *mcpService) {
 		serverID := strings.TrimSpace(input.ServerID)
 		workloadName := strings.TrimSpace(input.WorkloadName)
 		return cliRequest{Command: "deployment.clone", ID: strings.TrimSpace(input.DeploymentID), RequestID: strings.TrimSpace(input.RequestID), DeploymentPatch: &DeploymentPatchInput{
+			Environment: input.Environment, DatabaseConnectionID: input.DatabaseConnectionID,
 			ProjectID: input.ProjectID, ServerID: &serverID, WorkloadKind: input.WorkloadKind,
 			WorkloadName: &workloadName, ContainerPorts: input.ContainerPorts, RestartPolicy: input.RestartPolicy,
 		}}, nil

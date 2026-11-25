@@ -444,7 +444,7 @@ struct DomainsPage: View {
 
     private func deploymentName(_ id: String) -> String {
         guard let value = model.deployments.first(where: { $0.id == id }) else { return "部署已移除" }
-        return "\(value["projectName"].string) · \(value["serverName"].string)"
+        return value.deploymentDisplayName + " · " + value["serverName"].string
     }
 
     private func copyDNSRecordText(_ value: String) {

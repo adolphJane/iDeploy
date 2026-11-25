@@ -208,6 +208,10 @@ func (s *Server) importBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	if err := lockWorkspaceMutation(r.Context(), tx); err != nil {
+		http.Error(w, "workspace unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	var previous string
 	err = tx.QueryRowContext(r.Context(), s.query(`SELECT digest FROM shared_imports WHERE id=$1`), input.BatchID).Scan(&previous)
 	if err == nil {
@@ -245,6 +249,10 @@ func (s *Server) importBatch(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "import failed", http.StatusServiceUnavailable)
 			return
 		}
+	}
+	if err := validateDeploymentEnvironments(r.Context(), tx); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
 	}
 	if _, err := tx.ExecContext(r.Context(), s.query(`INSERT INTO shared_imports(id,digest,item_count,created_at) VALUES($1,$2,$3,$4)`), input.BatchID, digest, len(input.Records), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		http.Error(w, "import failed", http.StatusConflict)

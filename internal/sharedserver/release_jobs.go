@@ -166,7 +166,11 @@ func (s *Server) validateReleaseJobResources(ctx context.Context, job RemoteRele
 	if err != nil {
 		return err
 	}
-	if release["deployment_id"] != job.DeploymentID || release["version"] != job.Version || release["build_mode"] != "remote" {
+	tag, _ := release["image_tag"].(string)
+	if tag == "" {
+		tag, _ = release["version"].(string)
+	}
+	if release["deployment_id"] != job.DeploymentID || tag != job.Version || release["build_mode"] != "remote" {
 		return errors.New("release snapshot mismatch")
 	}
 	reg, err := read("r.registries", job.RegistryID)

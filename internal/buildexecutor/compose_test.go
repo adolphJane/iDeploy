@@ -91,3 +91,15 @@ esac
 		t.Fatalf("compose build: %s %v", manifest, err)
 	}
 }
+
+func TestNamedEnvironmentRejectsUnscopedComposeBuildTags(t *testing.T) {
+	tag := "ideploy-env-deployment-1.2.3"
+	file := `{"services":{"api":{"image":"registry.invalid/api:` + tag + `","build":{"tags":["registry.invalid/api:latest"]}}}}`
+	if err := ValidateComposeArtifactTags(file, tag); err == nil {
+		t.Fatal("accepted an unscoped additional build tag")
+	}
+	file = strings.Replace(file, "api:latest", "api:"+tag, 1)
+	if err := ValidateComposeArtifactTags(file, tag); err != nil {
+		t.Fatal(err)
+	}
+}

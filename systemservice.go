@@ -42,16 +42,18 @@ type ToolStatus struct {
 }
 
 type JobView struct {
-	LockKey   string `json:"lockKey"`
-	ID        string `json:"id"`
-	Type      string `json:"type"`
-	Status    string `json:"status"`
-	Progress  int    `json:"progress"`
-	Message   string `json:"message"`
-	Error     string `json:"error"`
-	Attempt   int    `json:"attempt"`
-	CreatedAt string `json:"createdAt"`
-	UpdatedAt string `json:"updatedAt"`
+	TargetName  string `json:"targetName,omitempty"`
+	Environment string `json:"environment,omitempty"`
+	LockKey     string `json:"lockKey"`
+	ID          string `json:"id"`
+	Type        string `json:"type"`
+	Status      string `json:"status"`
+	Progress    int    `json:"progress"`
+	Message     string `json:"message"`
+	Error       string `json:"error"`
+	Attempt     int    `json:"attempt"`
+	CreatedAt   string `json:"createdAt"`
+	UpdatedAt   string `json:"updatedAt"`
 }
 
 type Overview struct {
@@ -87,6 +89,7 @@ type RegistryInput struct {
 }
 
 type DatabaseConnectionInput struct {
+	Environment  string `json:"environment,omitempty"`
 	Name         string `json:"name"`
 	Driver       string `json:"driver"`
 	Host         string `json:"host"`
@@ -98,6 +101,7 @@ type DatabaseConnectionInput struct {
 }
 
 type DatabaseConnectionView struct {
+	Environment          string `json:"environment"`
 	ID                   string `json:"id"`
 	Name                 string `json:"name"`
 	Driver               string `json:"driver"`
@@ -338,16 +342,19 @@ type ProjectView struct {
 }
 
 type DeploymentInput struct {
-	BuildMode      string   `json:"buildMode"`
-	WorkloadKind   string   `json:"workloadKind"`
-	WorkloadName   string   `json:"workloadName"`
-	ProjectID      string   `json:"projectId"`
-	ServerID       string   `json:"serverId"`
-	ContainerPorts []string `json:"containerPorts"`
-	RestartPolicy  string   `json:"restartPolicy"`
+	Environment          string   `json:"environment,omitempty"`
+	DatabaseConnectionID *string  `json:"databaseConnectionId,omitempty"`
+	BuildMode            string   `json:"buildMode"`
+	WorkloadKind         string   `json:"workloadKind"`
+	WorkloadName         string   `json:"workloadName"`
+	ProjectID            string   `json:"projectId"`
+	ServerID             string   `json:"serverId"`
+	ContainerPorts       []string `json:"containerPorts"`
+	RestartPolicy        string   `json:"restartPolicy"`
 }
 
 type DeploymentReleaseInput struct {
+	ExpectedEnvironment    string `json:"expectedEnvironment,omitempty"`
 	ExpectedPolicyRevision *int64 `json:"policyRevision,omitempty"`
 	controlRequestID       string
 	DeploymentID           string `json:"deploymentId"`
@@ -368,6 +375,7 @@ type DeploymentVersionSuggestionView struct {
 }
 
 type DeploymentReleaseView struct {
+	ImageTag            string `json:"imageTag,omitempty"`
 	BuildMode           string `json:"buildMode"`
 	SourceCommit        string `json:"sourceCommit"`
 	DeliveryRef         string `json:"deliveryRef"`
@@ -395,6 +403,8 @@ type DeploymentReleaseView struct {
 // deliberately not persisted here: the desktop queries Docker when rendering
 // the deployment page so an old local record is never presented as live.
 type DeploymentView struct {
+	Environment                string   `json:"environment"`
+	DatabaseConnectionID       string   `json:"databaseConnectionId,omitempty"`
 	BuildMode                  string   `json:"buildMode"`
 	WorkloadKind               string   `json:"workloadKind"`
 	WorkloadName               string   `json:"workloadName"`
@@ -550,6 +560,11 @@ func (s *SystemService) startWithPaths(ctx context.Context, serveControl bool, p
 		_ = runtimeLock.Release()
 		return err
 	}
+	if err := databases.ReconcileInterruptedInstances(ctx); err != nil {
+		db.Close()
+		_ = runtimeLock.Release()
+		return err
+	}
 	if err := domain.NewStore(db).ReconcileInterruptedExternalRoutes(ctx); err != nil {
 		db.Close()
 		_ = runtimeLock.Release()
@@ -582,6 +597,7 @@ func (s *SystemService) startWithPaths(ctx context.Context, serveControl bool, p
 	runner.Register("server.certbot.renew", s.serverCertbotRenewHandler)
 	runner.Register("server.container.operation", s.serverContainerOperationHandler)
 	runner.Register("deployment.operation", s.deploymentOperationHandler)
+	runner.Register("database.instance", s.managedDatabaseHandler)
 	runner.Register("deployment.release", s.deploymentReleaseHandler)
 	runner.Register("deployment.rollback", s.deploymentRollbackHandler)
 	runner.Register("deployment.resume", s.deploymentResumeHandler)
@@ -699,6 +715,18 @@ func (s *SystemService) UpdateDatabaseConnection(id string, input DatabaseConnec
 	current, err := store.Get(ctx, id)
 	if err != nil {
 		return DatabaseConnectionView{}, err
+	}
+	if input.Environment == "" {
+		input.Environment = current.Environment
+	}
+	normalized, err := toDatabaseConnection(input, current.CredentialRef).Validate()
+	if err != nil {
+		return DatabaseConnectionView{}, err
+	}
+	if normalized.Environment != current.Environment {
+		if err := store.CanChangeEnvironment(ctx, id); err != nil {
+			return DatabaseConnectionView{}, err
+		}
 	}
 	credentialRef := current.CredentialRef
 	if strings.TrimSpace(input.Password) != "" {
@@ -1313,6 +1341,7 @@ func (s *SystemService) CreateDeployment(input DeploymentInput) (DeploymentView,
 		return DeploymentView{}, err
 	}
 	target, err := deployments.Create(ctx, deployment.Input{
+		Environment: input.Environment, DatabaseConnectionID: input.DatabaseConnectionID,
 		BuildMode: deployment.BuildMode(input.BuildMode),
 		ProjectID: input.ProjectID, ServerID: input.ServerID, WorkloadKind: input.WorkloadKind,
 		WorkloadName: input.WorkloadName, ContainerPorts: input.ContainerPorts, RestartPolicy: input.RestartPolicy,
@@ -1955,6 +1984,14 @@ func (s *SystemService) ClearServerData() (CleanupView, error) {
 			credentialErrors++
 		}
 	}
+	for _, id := range cleared.DatabaseInstanceIDs {
+		if err := databasebrowser.DeletePassword(ctx, managedDatabaseCredential(id)); err != nil {
+			credentialErrors++
+		}
+		if err := databasebrowser.DeletePassword(ctx, managedDatabaseAppCredential(id)); err != nil {
+			credentialErrors++
+		}
+	}
 	detail := "服务器本地数据已全部清除"
 	if credentialErrors > 0 {
 		detail = fmt.Sprintf("服务器数据已清除，但有 %d 个系统钥匙串凭据未能删除", credentialErrors)
@@ -2280,7 +2317,7 @@ func (s *SystemService) databaseConnectionContext(id string, timeout time.Durati
 }
 
 func toDatabaseConnection(input DatabaseConnectionInput, credentialRef string) databasebrowser.NewConnection {
-	return databasebrowser.NewConnection{Name: input.Name, Driver: databasebrowser.Driver(input.Driver), Host: input.Host, Port: input.Port, DatabaseName: input.DatabaseName, Username: input.Username, SSLMode: input.SSLMode, CredentialRef: credentialRef}
+	return databasebrowser.NewConnection{Environment: input.Environment, Name: input.Name, Driver: databasebrowser.Driver(input.Driver), Host: input.Host, Port: input.Port, DatabaseName: input.DatabaseName, Username: input.Username, SSLMode: input.SSLMode, CredentialRef: credentialRef}
 }
 
 func toDatabaseConnectionView(value databasebrowser.Connection) DatabaseConnectionView {
@@ -2288,7 +2325,7 @@ func toDatabaseConnectionView(value databasebrowser.Connection) DatabaseConnecti
 	if value.LastConnected != nil {
 		lastConnected = value.LastConnected.UTC().Format(time.RFC3339Nano)
 	}
-	return DatabaseConnectionView{ID: value.ID, Name: value.Name, Driver: string(value.Driver), Host: value.Host, Port: value.Port, DatabaseName: value.DatabaseName, Username: value.Username, SSLMode: value.SSLMode, CredentialConfigured: value.CredentialRef != "", CreatedAt: value.CreatedAt.UTC().Format(time.RFC3339Nano), UpdatedAt: value.UpdatedAt.UTC().Format(time.RFC3339Nano), LastConnectedAt: lastConnected, LastError: value.LastError}
+	return DatabaseConnectionView{Environment: value.Environment, ID: value.ID, Name: value.Name, Driver: string(value.Driver), Host: value.Host, Port: value.Port, DatabaseName: value.DatabaseName, Username: value.Username, SSLMode: value.SSLMode, CredentialConfigured: value.CredentialRef != "", CreatedAt: value.CreatedAt.UTC().Format(time.RFC3339Nano), UpdatedAt: value.UpdatedAt.UTC().Format(time.RFC3339Nano), LastConnectedAt: lastConnected, LastError: value.LastError}
 }
 
 func toDatabaseColumnViews(values []databasebrowser.Column) []DatabaseColumnView {
@@ -2682,6 +2719,7 @@ func deploymentViewFor(ctx context.Context, projects *project.Store, servers *se
 		return DeploymentView{}, err
 	}
 	return DeploymentView{
+		Environment: target.Environment, DatabaseConnectionID: target.DatabaseConnectionID,
 		BuildMode:    string(target.BuildMode),
 		WorkloadKind: target.WorkloadKind, WorkloadName: target.WorkloadName,
 		ID: target.ID, ProjectID: workspaceProject.ID, ProjectName: workspaceProject.Name,
@@ -2701,6 +2739,7 @@ func toDeploymentReleaseView(value deployment.Release) DeploymentReleaseView {
 		finishedAt = value.FinishedAt.Format(time.RFC3339)
 	}
 	return DeploymentReleaseView{
+		ImageTag:  value.ImageTag,
 		BuildMode: string(value.BuildMode), SourceCommit: value.SourceCommit,
 		DeliveryRef: value.DeliveryRef, DeliveryCommit: value.DeliveryCommit,
 		DeliveryDigest: value.DeliveryDigest, RemoteJobID: value.RemoteJobID,

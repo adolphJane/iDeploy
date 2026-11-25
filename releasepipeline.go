@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"ideploy/internal/buildexecutor"
 	"ideploy/internal/deployment"
 	"ideploy/internal/gitauth"
 	"ideploy/internal/job"
@@ -137,6 +138,9 @@ func buildAndPushRelease(ctx context.Context, source preparedSource, value proje
 		}
 		images, err := composeBuildImagesForPlatform(config, platform)
 		if err != nil {
+			return "", "", err
+		}
+		if err := buildexecutor.ValidateComposeArtifactTags(config, version); err != nil {
 			return "", "", err
 		}
 		reporter.Progress(28, "正在构建 Compose 服务镜像 · "+platform)
@@ -373,9 +377,7 @@ func loadRegistryPushPassword(ctx context.Context, connection registry.Connectio
 }
 
 func (s *SystemService) deploymentReleaseHandler(ctx context.Context, task job.Job, reporter job.Reporter) (handlerErr error) {
-	var payload struct {
-		ReleaseID string `json:"releaseId"`
-	}
+	var payload deploymentReleaseJob
 	if err := json.Unmarshal([]byte(task.Payload), &payload); err != nil || payload.ReleaseID == "" {
 		return errors.New("invalid deployment release payload")
 	}
@@ -413,6 +415,9 @@ func (s *SystemService) deploymentReleaseHandler(ctx context.Context, task job.J
 	if err != nil {
 		return err
 	}
+	if err := checkDeploymentJobTarget(task, target, payload.Environment); err != nil {
+		return err
+	}
 	if _, err := publicationRuntimePolicy(ctx, deployments, target, release); err != nil {
 		return err
 	}
@@ -446,6 +451,9 @@ func (s *SystemService) deploymentReleaseHandler(ctx context.Context, task job.J
 	}
 	host, err = s.verifyDeploymentServer(ctx, host)
 	if err != nil {
+		return err
+	}
+	if err := s.checkDeploymentDatabase(ctx, target, host); err != nil {
 		return err
 	}
 	platformOutput, err := server.NewRemote().DockerPlatform(ctx, host)
@@ -518,12 +526,15 @@ func (s *SystemService) deploymentReleaseHandler(ctx context.Context, task job.J
 		if proxyErr != nil {
 			return proxyErr
 		}
-		imageRef, manifest, err = buildAndPushRelease(ctx, source, projectValue, target, registryValue, registryPassword, release.Version, platform, basePath, buildProxy, reporter, func(status deployment.ReleaseStatus, detail string) error {
+		imageRef, manifest, err = buildAndPushRelease(ctx, source, projectValue, target, registryValue, registryPassword, release.ArtifactTag(), platform, basePath, buildProxy, reporter, func(status deployment.ReleaseStatus, detail string) error {
 			return deployments.UpdateRelease(ctx, release.ID, status, detail, "", source.revision, "")
 		})
 	}
 	if err != nil {
 		return err
+	}
+	if target.WorkloadKind == "compose" {
+		imageRef = "compose:" + target.WorkloadName + ":" + release.Version
 	}
 	if err := deployments.UpdateRelease(ctx, release.ID, deployment.ReleasePulling, "服务器正在拉取镜像", imageRef, source.revision, manifest); err != nil {
 		return err
@@ -541,7 +552,7 @@ func (s *SystemService) deploymentReleaseHandler(ctx context.Context, task job.J
 	if err := remote.PullImageWithAgent(ctx, host, target.ServerID, task.ID, imageRef); err != nil {
 		return err
 	}
-	runtimeImageRef, err := runtimeTaggedImageReference(imageRef, release.Version)
+	runtimeImageRef, err := runtimeTaggedImageReference(imageRef, release.ArtifactTag())
 	if err != nil {
 		return err
 	}
@@ -565,10 +576,7 @@ func (s *SystemService) deploymentResumeHandler(ctx context.Context, task job.Jo
 }
 
 func (s *SystemService) deploymentArtifactHandler(ctx context.Context, task job.Job, reporter job.Reporter, rollback bool) (handlerErr error) {
-	var payload struct {
-		ReleaseID string `json:"releaseId"`
-		SourceID  string `json:"sourceId"`
-	}
+	var payload deploymentReleaseJob
 	if err := json.Unmarshal([]byte(task.Payload), &payload); err != nil || payload.ReleaseID == "" || payload.SourceID == "" {
 		return errors.New("invalid deployment artifact payload")
 	}
@@ -616,6 +624,9 @@ func (s *SystemService) deploymentArtifactHandler(ctx context.Context, task job.
 	if err != nil {
 		return err
 	}
+	if err := checkDeploymentJobTarget(task, target, payload.Environment); err != nil {
+		return err
+	}
 	if !rollback {
 		if err := s.validateReleasePathReady(ctx, release.ID, target.ServerID); err != nil {
 			return err
@@ -636,6 +647,11 @@ func (s *SystemService) deploymentArtifactHandler(ctx context.Context, task job.
 	}
 	if host.Status != server.StatusHealthy {
 		return errors.New("目标服务器当前不可用，无法部署已有制品")
+	}
+	if !rollback {
+		if err := s.checkDeploymentDatabase(ctx, target, host); err != nil {
+			return err
+		}
 	}
 	projects, err := s.projectStore()
 	if err != nil {
@@ -695,7 +711,7 @@ func (s *SystemService) deploymentArtifactHandler(ctx context.Context, task job.
 	if err := remote.PullImageWithAgent(ctx, host, target.ServerID, task.ID, source.ImageRef); err != nil {
 		return err
 	}
-	runtimeImageRef, err := runtimeTaggedImageReference(source.ImageRef, source.Version)
+	runtimeImageRef, err := runtimeTaggedImageReference(source.ImageRef, source.ArtifactTag())
 	if err != nil {
 		return err
 	}
@@ -717,6 +733,10 @@ func (s *SystemService) deployAndCheckContainer(ctx context.Context, deployments
 	currentTarget, environment, err := s.resolveDeploymentEnvironmentRevision(ctx, deployments, target.ID)
 	if err != nil {
 		return err
+	}
+	if currentTarget.ServerID != target.ServerID || currentTarget.Environment != target.Environment ||
+		currentTarget.WorkloadKind != target.WorkloadKind || currentTarget.WorkloadName != target.WorkloadName {
+		return errors.New("部署目标已变更，请重新提交发布")
 	}
 	target = currentTarget
 	policy, err := publicationRuntimePolicy(ctx, deployments, target, release)

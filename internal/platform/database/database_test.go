@@ -25,8 +25,8 @@ func TestOpenAppliesMigrationsIdempotently(t *testing.T) {
 	if err := first.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&migrations); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if migrations != 28 {
-		t.Fatalf("expected 28 applied migrations, got %d", migrations)
+	if migrations != 30 {
+		t.Fatalf("expected 30 applied migrations, got %d", migrations)
 	}
 	if err := first.Close(); err != nil {
 		t.Fatalf("close first database: %v", err)
@@ -41,7 +41,7 @@ func TestOpenAppliesMigrationsIdempotently(t *testing.T) {
 	if err := second.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&migrations); err != nil {
 		t.Fatalf("count migrations after reopen: %v", err)
 	}
-	if migrations != 28 {
+	if migrations != 30 {
 		t.Fatalf("migration was not idempotent: got %d rows", migrations)
 	}
 }
@@ -79,9 +79,8 @@ func TestSharedJobSummaryIncludesOnlyNewJobsWithoutPayload(t *testing.T) {
 	}
 }
 
-func TestUpgradePreservesExistingAliDNSConnection(t *testing.T) {
-	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "legacy.db")
+func openLegacyDatabase(t *testing.T, ctx context.Context, path string, lastVersion int) *sql.DB {
+	t.Helper()
 	legacy, err := sql.Open("sqlite3", path)
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +101,7 @@ func TestUpgradePreservesExistingAliDNSConnection(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if version >= 15 {
+		if version > lastVersion {
 			continue
 		}
 		contents, err := migrations.Files.ReadFile(entry.Name())
@@ -116,7 +115,14 @@ func TestUpgradePreservesExistingAliDNSConnection(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	_, err = legacy.ExecContext(ctx, "INSERT INTO dns_connections(id,name,access_key_id,credential_ref,created_at,updated_at) VALUES('old','Ali','AK-ID','keychain:alidns-access-key-secret:old','x','x')")
+	return legacy
+}
+
+func TestUpgradePreservesExistingAliDNSConnection(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	legacy := openLegacyDatabase(t, ctx, path, 14)
+	_, err := legacy.ExecContext(ctx, "INSERT INTO dns_connections(id,name,access_key_id,credential_ref,created_at,updated_at) VALUES('old','Ali','AK-ID','keychain:alidns-access-key-secret:old','x','x')")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,5 +140,45 @@ func TestUpgradePreservesExistingAliDNSConnection(t *testing.T) {
 	}
 	if provider != "aliyun" || ref != "keychain:alidns-access-key-secret:old" {
 		t.Fatalf("legacy connection changed: provider=%q ref=%q", provider, ref)
+	}
+}
+
+func TestUpgradePreservesDeploymentReleaseRoutesAndDatabaseConnection(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy-deployments.db")
+	legacy := openLegacyDatabase(t, ctx, path, 28)
+	if _, err := legacy.ExecContext(ctx, `
+		INSERT INTO projects(id,name,created_at,updated_at) VALUES('p','App','x','x');
+		INSERT INTO servers(id,name,host,ssh_user,created_at,updated_at) VALUES('host','Host','host.invalid','deploy','x','x');
+		INSERT INTO deployment_targets(id,project_id,server_id,created_at,updated_at,workload_kind,workload_name)
+			VALUES('d','p','host','x','x','container','app');
+		INSERT INTO deployment_releases(id,deployment_id,version,status,created_at) VALUES('r','d','1.0.0','succeeded','x');
+		INSERT INTO deployment_publish_paths(deployment_id,fqdn,path_prefix,container_port,updated_at)
+			VALUES('d','app.invalid','app',8080,'x');
+		INSERT INTO database_connections(id,name,driver,host,port,database_name,username,credential_ref,created_at,updated_at)
+			VALUES('db','People','postgres','db.invalid',5432,'people','reader','keychain:database-password:db','x','x')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := database.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upgraded.Close()
+	var environment, databaseEnvironment, imageTag, pathPrefix, keychainRef string
+	err = upgraded.QueryRowContext(ctx, `
+		SELECT d.environment,b.environment,r.image_tag,p.path_prefix,b.credential_ref
+		FROM deployment_targets d
+		JOIN deployment_releases r ON r.deployment_id=d.id
+		JOIN deployment_publish_paths p ON p.deployment_id=d.id
+		JOIN database_connections b ON b.id='db'
+		WHERE d.id='d' AND r.id='r'
+	`).Scan(&environment, &databaseEnvironment, &imageTag, &pathPrefix, &keychainRef)
+	if err != nil || environment != "default" || databaseEnvironment != "default" || imageTag != "" ||
+		pathPrefix != "app" || keychainRef != "keychain:database-password:db" {
+		t.Fatalf("legacy associations changed: %q %q %q %q %q (%v)", environment, databaseEnvironment, imageTag, pathPrefix, keychainRef, err)
 	}
 }

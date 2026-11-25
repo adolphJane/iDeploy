@@ -55,7 +55,7 @@ func saveRecoveredRemoteArtifact(ctx context.Context, store *deployment.Store, s
 	}
 	imageRef, manifest := remote.ImageRef, remote.Manifest
 	if strings.HasPrefix(imageRef, "compose:") {
-		if imageRef != "compose:"+source.DeploymentID+":"+source.Version || manifest == "" || len(manifest) > 900*1024 {
+		if imageRef != "compose:"+source.DeploymentID+":"+source.ArtifactTag() || manifest == "" || len(manifest) > 900*1024 {
 			return source, errors.New("远端 Compose 制品不完整")
 		}
 		if _, err := buildexecutor.PinComposeManifest(manifest); err != nil {

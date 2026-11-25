@@ -21,6 +21,8 @@ ideploy doctor
 ideploy mcp
 ```
 
+部署列表和详情返回 `environment`。为已有部署指定环境时沿用原部署 ID。`--database` 只能绑定同环境的数据库连接，传入空字符串会解除关联。
+
 ## 命令
 
 ```text
@@ -33,6 +35,7 @@ ideploy registry list
 ideploy ingress list
 ideploy deployment list
 ideploy deployment get <deployment-id>
+ideploy deployment configure <deployment-id> [--environment test|production|default] [--database <connection-id>]
 
 ideploy deployment publish <deployment-id> --registry <registry-id> --domain <fqdn> --path <name> --container-port <port> [--service <name>] [--version <version>]
 ideploy deployment rollback <deployment-id> --release <release-id>

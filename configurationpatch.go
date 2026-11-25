@@ -24,12 +24,14 @@ type ProjectPatchInput struct {
 }
 
 type DeploymentPatchInput struct {
-	ProjectID      *string   `json:"projectId,omitempty"`
-	ServerID       *string   `json:"serverId,omitempty"`
-	WorkloadKind   *string   `json:"workloadKind,omitempty"`
-	WorkloadName   *string   `json:"workloadName,omitempty"`
-	ContainerPorts *[]string `json:"containerPorts,omitempty"`
-	RestartPolicy  *string   `json:"restartPolicy,omitempty"`
+	Environment          *string   `json:"environment,omitempty"`
+	DatabaseConnectionID *string   `json:"databaseConnectionId,omitempty"`
+	ProjectID            *string   `json:"projectId,omitempty"`
+	ServerID             *string   `json:"serverId,omitempty"`
+	WorkloadKind         *string   `json:"workloadKind,omitempty"`
+	WorkloadName         *string   `json:"workloadName,omitempty"`
+	ContainerPorts       *[]string `json:"containerPorts,omitempty"`
+	RestartPolicy        *string   `json:"restartPolicy,omitempty"`
 }
 
 func (s *SystemService) PatchProject(id string, patch ProjectPatchInput) (ProjectView, error) {
@@ -83,10 +85,12 @@ func (s *SystemService) PatchDeployment(id string, patch DeploymentPatchInput) (
 		return DeploymentView{}, err
 	}
 	input := deployment.Input{
+		Environment: current.Environment, DatabaseConnectionID: patch.DatabaseConnectionID, BuildMode: current.BuildMode,
 		ProjectID: current.ProjectID, ServerID: current.ServerID, WorkloadKind: current.WorkloadKind,
 		WorkloadName: current.WorkloadName, ContainerPorts: append([]string(nil), current.ContainerPorts...),
 		RestartPolicy: current.RestartPolicy,
 	}
+	applyStringPatch(&input.Environment, patch.Environment)
 	applyStringPatch(&input.ProjectID, patch.ProjectID)
 	applyStringPatch(&input.ServerID, patch.ServerID)
 	applyStringPatch(&input.WorkloadKind, patch.WorkloadKind)
@@ -128,10 +132,12 @@ func (s *SystemService) CloneDeployment(id string, patch DeploymentPatchInput) (
 		return DeploymentView{}, err
 	}
 	input := DeploymentInput{
+		DatabaseConnectionID: patch.DatabaseConnectionID, BuildMode: string(current.BuildMode),
 		ProjectID: current.ProjectID, ServerID: current.ServerID, WorkloadKind: current.WorkloadKind,
 		WorkloadName: current.WorkloadName, ContainerPorts: append([]string(nil), current.ContainerPorts...),
 		RestartPolicy: current.RestartPolicy,
 	}
+	applyStringPatch(&input.Environment, patch.Environment)
 	applyStringPatch(&input.ProjectID, patch.ProjectID)
 	applyStringPatch(&input.ServerID, patch.ServerID)
 	applyStringPatch(&input.WorkloadKind, patch.WorkloadKind)

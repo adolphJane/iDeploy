@@ -28,11 +28,11 @@ func (s *Store) Create(ctx context.Context, input Input) (Target, error) {
 	now := formatTime(time.Now())
 	ports, _ := json.Marshal(input.ContainerPorts)
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO deployment_targets(id, project_id, server_id, desired_state, created_at, updated_at, workload_kind, workload_name, container_ports_json, restart_policy, build_mode)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, id, input.ProjectID, input.ServerID, DesiredRunning, now, now, input.WorkloadKind, input.WorkloadName, string(ports), input.RestartPolicy, input.BuildMode)
+		INSERT INTO deployment_targets(id, project_id, server_id, desired_state, created_at, updated_at, workload_kind, workload_name, container_ports_json, restart_policy, build_mode, environment, database_connection_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?,''))
+	`, id, input.ProjectID, input.ServerID, DesiredRunning, now, now, input.WorkloadKind, input.WorkloadName, string(ports), input.RestartPolicy, input.BuildMode, input.Environment, databaseConnectionID(input.DatabaseConnectionID))
 	if err != nil {
-		return Target{}, fmt.Errorf("create deployment target: %w", err)
+		return Target{}, deploymentConfigurationError(err)
 	}
 	return s.Get(ctx, id)
 }
@@ -84,6 +84,7 @@ func (s *Store) Configure(ctx context.Context, id string, input Input) error {
 		return err
 	}
 	input.ProjectID, input.ServerID = current.ProjectID, current.ServerID
+	preserveDeploymentAssociations(&input, current)
 	input, err = input.Validate()
 	if err != nil {
 		return err
@@ -91,14 +92,14 @@ func (s *Store) Configure(ctx context.Context, id string, input Input) error {
 	ports, _ := json.Marshal(input.ContainerPorts)
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE deployment_targets
-		SET workload_kind=?, workload_name=?, container_ports_json=?, restart_policy=?, build_mode=?, updated_at=?
+		SET workload_kind=?, workload_name=?, container_ports_json=?, restart_policy=?, build_mode=?, environment=?, database_connection_id=NULLIF(?,''), updated_at=?
 		WHERE id=? AND NOT EXISTS (
 			SELECT 1 FROM jobs WHERE lock_key='server:' || deployment_targets.server_id
 			AND status IN ('queued','running','canceling')
 		)
-	`, input.WorkloadKind, input.WorkloadName, string(ports), input.RestartPolicy, input.BuildMode, formatTime(time.Now()), id)
+	`, input.WorkloadKind, input.WorkloadName, string(ports), input.RestartPolicy, input.BuildMode, input.Environment, databaseConnectionID(input.DatabaseConnectionID), formatTime(time.Now()), id)
 	if err != nil {
-		return fmt.Errorf("configure deployment target: %w", err)
+		return deploymentConfigurationError(err)
 	}
 	if affected, err := result.RowsAffected(); err != nil {
 		return err
@@ -115,6 +116,7 @@ func (s *Store) Update(ctx context.Context, id string, input Input) (Target, err
 	if err != nil {
 		return Target{}, err
 	}
+	preserveDeploymentAssociations(&input, current)
 	input, err = input.Validate()
 	if err != nil {
 		return Target{}, err
@@ -123,15 +125,15 @@ func (s *Store) Update(ctx context.Context, id string, input Input) (Target, err
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE deployment_targets
 		SET project_id=?, server_id=?, workload_kind=?, workload_name=?,
-			container_ports_json=?, restart_policy=?, build_mode=?, updated_at=?
+			container_ports_json=?, restart_policy=?, build_mode=?, environment=?, database_connection_id=NULLIF(?,''), updated_at=?
 		WHERE id=? AND NOT EXISTS (
 			SELECT 1 FROM jobs WHERE status IN ('queued','running','canceling')
 			AND lock_key IN ('server:' || ?, 'server:' || ?)
 		)
 	`, input.ProjectID, input.ServerID, input.WorkloadKind, input.WorkloadName,
-		string(ports), input.RestartPolicy, input.BuildMode, formatTime(time.Now()), id, current.ServerID, input.ServerID)
+		string(ports), input.RestartPolicy, input.BuildMode, input.Environment, databaseConnectionID(input.DatabaseConnectionID), formatTime(time.Now()), id, current.ServerID, input.ServerID)
 	if err != nil {
-		return Target{}, fmt.Errorf("update deployment target: %w", err)
+		return Target{}, deploymentConfigurationError(err)
 	}
 	if affected, err := result.RowsAffected(); err != nil {
 		return Target{}, err
@@ -233,8 +235,9 @@ func (s *Store) CreateRelease(ctx context.Context, input ReleaseInput) (Release,
 		rollbackToID = input.RollbackToID
 	}
 	var environmentRevision, runtimeRevision int64
-	if err := tx.QueryRowContext(ctx, `SELECT d.environment_revision,COALESCE(p.revision,0)
-		FROM deployment_targets d LEFT JOIN deployment_runtime_policies p ON p.deployment_id=d.id WHERE d.id=?`, input.DeploymentID).Scan(&environmentRevision, &runtimeRevision); err != nil {
+	var environment string
+	if err := tx.QueryRowContext(ctx, `SELECT d.environment_revision,COALESCE(p.revision,0),d.environment
+		FROM deployment_targets d LEFT JOIN deployment_runtime_policies p ON p.deployment_id=d.id WHERE d.id=?`, input.DeploymentID).Scan(&environmentRevision, &runtimeRevision, &environment); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Release{}, ErrNotFound
 		}
@@ -243,6 +246,10 @@ func (s *Store) CreateRelease(ctx context.Context, input ReleaseInput) (Release,
 	if input.ExpectedPolicyRevision != nil && *input.ExpectedPolicyRevision != runtimeRevision {
 		return Release{}, ErrRuntimePolicyConflict
 	}
+	imageTag, err := releaseImageTag(ctx, tx, input, environment)
+	if err != nil {
+		return Release{}, err
+	}
 	manifestEnvelope, err := sealManifest(ctx, input.Manifest)
 	if err != nil {
 		return Release{}, err
@@ -250,10 +257,10 @@ func (s *Store) CreateRelease(ctx context.Context, input ReleaseInput) (Release,
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO deployment_releases(
 			id, deployment_id, registry_id, action, version, image_ref, manifest, manifest_envelope,
-			rollback_to_id, status, environment_revision, created_at, build_mode
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			rollback_to_id, status, environment_revision, created_at, build_mode, image_tag
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, id, input.DeploymentID, registryID, input.Action, input.Version, input.ImageRef,
-		"", manifestEnvelope, rollbackToID, ReleaseQueued, environmentRevision, now, input.BuildMode)
+		"", manifestEnvelope, rollbackToID, ReleaseQueued, environmentRevision, now, input.BuildMode, imageTag)
 	if err != nil {
 		return Release{}, fmt.Errorf("create deployment release: %w", err)
 	}
@@ -518,7 +525,7 @@ const releaseSelect = `
 	SELECT id, deployment_id, COALESCE(registry_id,''), COALESCE(job_id,''), action,
 		version, image_ref, source_revision, manifest, manifest_envelope, COALESCE(rollback_to_id,''),
 		status, detail, environment_revision, created_at, finished_at, build_mode,
-		source_commit, delivery_ref, delivery_commit, delivery_digest, remote_job_id
+		source_commit, delivery_ref, delivery_commit, delivery_digest, remote_job_id, image_tag
 	FROM deployment_releases
 `
 
@@ -529,7 +536,7 @@ func scanRelease(row scanner) (Release, error) {
 	if err := row.Scan(&value.ID, &value.DeploymentID, &value.RegistryID, &value.JobID,
 		&value.Action, &value.Version, &value.ImageRef, &value.SourceRevision, &value.Manifest, &value.manifestEnvelope,
 		&value.RollbackToID, &status, &value.Detail, &value.EnvironmentRevision, &createdAt, &finishedAt,
-		&value.BuildMode, &value.SourceCommit, &value.DeliveryRef, &value.DeliveryCommit, &value.DeliveryDigest, &value.RemoteJobID); err != nil {
+		&value.BuildMode, &value.SourceCommit, &value.DeliveryRef, &value.DeliveryCommit, &value.DeliveryDigest, &value.RemoteJobID, &value.ImageTag); err != nil {
 		return Release{}, err
 	}
 	value.Status = ReleaseStatus(status)
@@ -561,7 +568,7 @@ func hydrateManifest(ctx context.Context, value *Release) error {
 
 const targetSelect = `
 	SELECT id, project_id, server_id, desired_state, created_at, updated_at, workload_kind, workload_name,
-		container_ports_json, restart_policy, environment_revision, applied_environment_revision, build_mode
+		container_ports_json, restart_policy, environment_revision, applied_environment_revision, build_mode, environment, COALESCE(database_connection_id,'')
 	FROM deployment_targets
 `
 
@@ -571,7 +578,7 @@ func scanTarget(row scanner) (Target, error) {
 	var value Target
 	var portsJSON string
 	var desiredState, createdAt, updatedAt string
-	if err := row.Scan(&value.ID, &value.ProjectID, &value.ServerID, &desiredState, &createdAt, &updatedAt, &value.WorkloadKind, &value.WorkloadName, &portsJSON, &value.RestartPolicy, &value.EnvironmentRevision, &value.AppliedEnvironmentRevision, &value.BuildMode); err != nil {
+	if err := row.Scan(&value.ID, &value.ProjectID, &value.ServerID, &desiredState, &createdAt, &updatedAt, &value.WorkloadKind, &value.WorkloadName, &portsJSON, &value.RestartPolicy, &value.EnvironmentRevision, &value.AppliedEnvironmentRevision, &value.BuildMode, &value.Environment, &value.DatabaseConnectionID); err != nil {
 		return Target{}, err
 	}
 	value.DesiredState = DesiredState(desiredState)

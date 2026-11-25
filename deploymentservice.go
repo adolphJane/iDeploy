@@ -15,6 +15,25 @@ import (
 	"time"
 )
 
+type deploymentReleaseJob struct {
+	ReleaseID   string `json:"releaseId"`
+	SourceID    string `json:"sourceId,omitempty"`
+	Environment string `json:"environment,omitempty"`
+}
+
+type deploymentOperationJob struct {
+	ID          string `json:"id"`
+	Action      string `json:"action"`
+	Environment string `json:"environment,omitempty"`
+}
+
+func checkDeploymentJobTarget(task job.Job, target deployment.Target, expectedEnvironment string) error {
+	if task.LockKey != "server:"+target.ServerID || expectedEnvironment != "" && target.Environment != expectedEnvironment {
+		return errors.New("部署目标或环境已变更，请重新提交操作")
+	}
+	return nil
+}
+
 func toRemoteContainerView(c server.Container) RemoteContainerView {
 	return RemoteContainerView{ID: c.ID, Name: c.Name, Image: c.Image, State: c.State, Status: c.Status, Ports: c.Ports, Created: c.Created, ComposeProject: c.ComposeProject, Health: c.Health, OneOff: c.OneOff}
 }
@@ -30,7 +49,11 @@ func (s *SystemService) GetJob(id string) (JobView, error) {
 	if errors.Is(err, job.ErrNotFound) {
 		return s.sharedJobSummary(ctx, id)
 	}
-	return toJobView(value), err
+	view := toJobView(value)
+	if err == nil {
+		s.describeJobTarget(ctx, value, &view)
+	}
+	return view, err
 }
 
 func (s *SystemService) BindDeployment(id, kind, name string) error {
@@ -58,6 +81,7 @@ func (s *SystemService) ConfigureDeployment(id string, input DeploymentInput) er
 		input.BuildMode = string(current.BuildMode)
 	}
 	return store.Configure(ctx, id, deployment.Input{
+		Environment: input.Environment, DatabaseConnectionID: input.DatabaseConnectionID,
 		BuildMode:    deployment.BuildMode(input.BuildMode),
 		WorkloadKind: input.WorkloadKind, WorkloadName: input.WorkloadName,
 		ContainerPorts: input.ContainerPorts, RestartPolicy: input.RestartPolicy,
@@ -168,6 +192,9 @@ func (s *SystemService) publishDeployment(input DeploymentReleaseInput, retrySou
 	if err != nil {
 		return JobView{}, err
 	}
+	if input.ExpectedEnvironment != "" && target.Environment != input.ExpectedEnvironment {
+		return JobView{}, errors.New("部署环境已变更，请关闭发布窗口后重新选择目标")
+	}
 	if target.BuildMode == deployment.BuildRemote {
 		status, statusErr := s.GetSharedWorkspaceStatus()
 		if statusErr != nil || status.Mode != "shared" {
@@ -232,6 +259,9 @@ func (s *SystemService) publishDeployment(input DeploymentReleaseInput, retrySou
 	_, err = s.verifyDeploymentServer(probeContext, host)
 	probeCancel()
 	if err != nil {
+		return JobView{}, err
+	}
+	if err := s.checkDeploymentDatabase(ctx, target, host); err != nil {
 		return JobView{}, err
 	}
 	observedIngress, err := s.inspectInternalIngress(ctx, intent.FQDN)
@@ -303,9 +333,9 @@ func (s *SystemService) publishDeployment(input DeploymentReleaseInput, retrySou
 		_ = store.UpdateRelease(ctx, release.ID, deployment.ReleaseFailed, err.Error(), "", "", "")
 		return JobView{}, err
 	}
-	payload, err := json.Marshal(struct {
-		ReleaseID string `json:"releaseId"`
-	}{ReleaseID: release.ID})
+	payload, err := json.Marshal(deploymentReleaseJob{
+		ReleaseID: release.ID, Environment: target.Environment,
+	})
 	if err != nil {
 		return JobView{}, err
 	}
@@ -461,10 +491,9 @@ func (s *SystemService) RetryRelease(releaseID string) (JobView, error) {
 		_ = store.UpdateRelease(ctx, release.ID, deployment.ReleaseFailed, err.Error(), "", "", "")
 		return JobView{}, err
 	}
-	payload, err := json.Marshal(struct {
-		ReleaseID string `json:"releaseId"`
-		SourceID  string `json:"sourceId"`
-	}{ReleaseID: release.ID, SourceID: source.ID})
+	payload, err := json.Marshal(deploymentReleaseJob{
+		ReleaseID: release.ID, SourceID: source.ID, Environment: target.Environment,
+	})
 	if err != nil {
 		return JobView{}, err
 	}
@@ -532,10 +561,9 @@ func (s *SystemService) RollbackDeployment(deploymentID, sourceReleaseID string)
 	if err != nil {
 		return JobView{}, err
 	}
-	payload, err := json.Marshal(struct {
-		ReleaseID string `json:"releaseId"`
-		SourceID  string `json:"sourceId"`
-	}{ReleaseID: release.ID, SourceID: source.ID})
+	payload, err := json.Marshal(deploymentReleaseJob{
+		ReleaseID: release.ID, SourceID: source.ID, Environment: target.Environment,
+	})
 	if err != nil {
 		return JobView{}, err
 	}
@@ -564,17 +592,13 @@ func (s *SystemService) OperateDeployment(id, action string) (JobView, error) {
 	if target.WorkloadName == "" {
 		return JobView{}, errors.New("请先绑定明确的远端工作负载")
 	}
-	return s.enqueueServerJob(target.ServerID, "deployment.operation", struct {
-		ID     string `json:"id"`
-		Action string `json:"action"`
-	}{id, action})
+	return s.enqueueServerJob(target.ServerID, "deployment.operation", deploymentOperationJob{
+		ID: id, Action: action, Environment: target.Environment,
+	})
 }
 
 func (s *SystemService) deploymentOperationHandler(ctx context.Context, task job.Job, reporter job.Reporter) error {
-	var p struct {
-		ID     string `json:"id"`
-		Action string `json:"action"`
-	}
+	var p deploymentOperationJob
 	if err := json.Unmarshal([]byte(task.Payload), &p); err != nil {
 		return err
 	}
@@ -587,6 +611,9 @@ func (s *SystemService) deploymentOperationHandler(ctx context.Context, task job
 	}
 	target, err := store.Get(ctx, p.ID)
 	if err != nil {
+		return err
+	}
+	if err := checkDeploymentJobTarget(task, target, p.Environment); err != nil {
 		return err
 	}
 	hosts, err := s.serverStore()
@@ -687,7 +714,7 @@ func (s *SystemService) recreateDeploymentContainer(ctx context.Context, store *
 	image := selected[0].Image
 	labels := map[string]string{"com.ideploy.environment-revision": fmt.Sprint(target.EnvironmentRevision)}
 	if release, releaseErr := store.LatestSucceededRelease(ctx, target.ID); releaseErr == nil {
-		if tagged, tagErr := runtimeTaggedImageReference(release.ImageRef, release.Version); tagErr == nil {
+		if tagged, tagErr := runtimeTaggedImageReference(release.ImageRef, release.ArtifactTag()); tagErr == nil {
 			image = tagged
 		}
 		labels["com.ideploy.pinned-image"] = release.ImageRef

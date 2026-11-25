@@ -13,11 +13,12 @@ var ErrNotFound = errors.New("server connection not found")
 type Store struct{ db *sql.DB }
 
 type ClearAllResult struct {
-	Servers        int64
-	Deployments    int64
-	Snapshots      int64
-	Jobs           int64
-	CredentialRefs []string
+	DatabaseInstanceIDs []string
+	Servers             int64
+	Deployments         int64
+	Snapshots           int64
+	Jobs                int64
+	CredentialRefs      []string
 }
 
 func NewStore(db *sql.DB) *Store { return &Store{db: db} }
@@ -105,14 +106,14 @@ func (s *Store) List(ctx context.Context) ([]Connection, error) {
 }
 
 func (s *Store) Delete(ctx context.Context, id string) error {
-	result, err := s.db.ExecContext(ctx, "DELETE FROM servers WHERE id = ? AND NOT EXISTS (SELECT 1 FROM deployment_targets WHERE server_id=servers.id) AND NOT EXISTS (SELECT 1 FROM jobs WHERE lock_key='server:' || servers.id AND status IN ('queued','running','canceling'))", id)
+	result, err := s.db.ExecContext(ctx, "DELETE FROM servers WHERE id = ? AND NOT EXISTS (SELECT 1 FROM deployment_targets WHERE server_id=servers.id) AND NOT EXISTS (SELECT 1 FROM managed_database_instances WHERE server_id=servers.id) AND NOT EXISTS (SELECT 1 FROM jobs WHERE lock_key='server:' || servers.id AND status IN ('queued','running','canceling'))", id)
 	if err != nil {
 		return fmt.Errorf("delete server: %w", err)
 	}
 	if affected, err := result.RowsAffected(); err != nil {
 		return err
 	} else if affected == 0 {
-		return errors.New("服务器不存在、仍有部署关联或任务未完成，请先移除关联并等待任务结束")
+		return errors.New("服务器不存在、仍有部署或数据库实例关联，或任务未完成，请先移除关联并等待任务结束")
 	}
 	return nil
 }
@@ -173,8 +174,31 @@ func (s *Store) ClearAll(ctx context.Context) (ClearAllResult, error) {
 		return ClearAllResult{}, err
 	}
 
+	instanceRows, err := tx.QueryContext(ctx, "SELECT id FROM managed_database_instances")
+	if err != nil {
+		return ClearAllResult{}, err
+	}
+	for instanceRows.Next() {
+		var id string
+		if err := instanceRows.Scan(&id); err != nil {
+			instanceRows.Close()
+			return ClearAllResult{}, err
+		}
+		result.DatabaseInstanceIDs = append(result.DatabaseInstanceIDs, id)
+	}
+	if err := instanceRows.Err(); err != nil {
+		instanceRows.Close()
+		return ClearAllResult{}, err
+	}
+	if err := instanceRows.Close(); err != nil {
+		return ClearAllResult{}, err
+	}
+
 	if _, err := tx.ExecContext(ctx, "DELETE FROM jobs WHERE lock_key LIKE 'server:%'"); err != nil {
 		return ClearAllResult{}, fmt.Errorf("clear server jobs: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM managed_database_instances"); err != nil {
+		return ClearAllResult{}, fmt.Errorf("clear managed database configurations: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM servers"); err != nil {
 		return ClearAllResult{}, fmt.Errorf("clear servers: %w", err)

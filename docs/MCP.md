@@ -108,7 +108,7 @@ MCP 客户端可以按以下顺序完成新项目的接入和发布：
 
 1. 先在桌面端“设置 → 应用入口”配置目标服务器的 HTTPS 入口。然后调用 `list_servers` 和 `list_registries`，让用户选择目标服务器与镜像仓库。
 2. 收集项目来源和构建配置，调用 `create_project`。本地项目使用 `source_kind=local` 并提供 iDeploy 所在机器可访问的绝对路径；Git 项目使用 `source_kind=git` 并提供仓库地址、引用类型和引用值。
-3. 使用返回的项目 ID、服务器 ID、工作负载类型与名称调用 `create_deployment`。
+3. 使用返回的项目 ID、服务器 ID、工作负载类型与名称调用 `create_deployment`。双环境目标通过 `environment` 传入 `test` 或 `production`，使用不同服务器。`database_connection_id` 可绑定桌面端保存的同环境数据库连接。
 4. 如有需要，使用 `update_deployment_environment` 配置普通运行变量；数据库密码、令牌等秘密使用 `request_deployment_secret_input` 让用户在本机隐藏输入框中填写。
 5. 用部署 ID、仓库 ID，以及已就绪入口的 `domain`、单级 `path`、应用 `container_port` 调用 `preflight_deployment` 和 `publish_deployment`。
 
@@ -129,7 +129,7 @@ ideploy deployment env set-secret <deployment-id> DATABASE_PASSWORD
 
 `set-secret` 会打开本机隐藏输入框，秘密不会出现在命令行参数或终端历史中。
 
-普通容器发布在服务器上始终先按不可变 Digest 拉取和校验制品，然后创建仅存在于服务器本地的 `repository:version` 标签，并使用该标签启动容器。这样发布记录和回滚仍由 Digest 保证确定性，而 `docker ps` 的 IMAGE 列会显示可读的仓库与版本。容器同时记录 `com.ideploy.pinned-image`、`com.ideploy.version` 和 `com.ideploy.release-id` 标签；本地版本标签不会被推送回 Registry。Compose 仍使用锁定 Digest 的 Compose 快照。
+普通容器发布在服务器上先按不可变 Digest 拉取和校验制品，再创建本地运行标签并用于启动。默认环境使用 `repository:version`，测试和线上环境分别使用带部署 ID 的镜像标签。这样发布记录和回滚仍由 Digest 保证确定性，而 `docker ps` 的 IMAGE 列会显示可读的仓库与版本。容器同时记录 `com.ideploy.pinned-image`、`com.ideploy.version` 和 `com.ideploy.release-id` 标签；运行标签在目标服务器上从锁定的 Digest 重建。Compose 仍使用锁定 Digest 的 Compose 快照。测试和线上环境的每个 Compose 构建服务都使用 `${IMAGE_TAG}` 作为镜像标签。
 
 单容器运行变量在发布或 `restart_deployment` 时通过 SSH 标准输入写入权限为 `0600` 的远程临时 env 文件，并由 `docker run --env-file` 注入；容器创建完成后立即删除临时文件。单容器重启是受控重建，健康检查失败会恢复原容器。Compose 环境变量暂不由此能力管理。
 
